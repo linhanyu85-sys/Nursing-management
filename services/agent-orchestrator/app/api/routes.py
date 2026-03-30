@@ -61,7 +61,7 @@ def _local_aliases() -> dict[str, tuple[str, str]]:
         "qwen2_5_3b_local": ("轻量回答（本地）", settings.local_llm_model_fallback),
         "qwen3_8b_local": ("下一步安排（本地）", settings.local_llm_model_planner),
         "deepseek_r1_qwen_7b_local": ("重点再看一遍（本地）", settings.local_llm_model_reasoning),
-        "custom_openai_local": ("自定义本地回答", settings.local_llm_model_custom),
+        "custom_local": ("自定义本地回答", settings.local_llm_model_custom),
     }
 
 
@@ -70,6 +70,10 @@ def _resolve_local_mdl(sel: str) -> str:
     if tup is None:
         return ""
     return tup[1]
+
+
+def _resolve_selected_local_model(sel: str | None) -> str:
+    return _resolve_local_mdl(str(sel or "").strip())
 
 
 def _online_set(st: dict[str, Any]) -> set[str]:
@@ -115,6 +119,17 @@ def _coerce_wf(wf: WorkflowType, ep: str | None) -> WorkflowType:
         if wf == WorkflowType.VOICE_INQUIRY:
             return WorkflowType.RECOMMENDATION
     return wf
+
+
+def _normalize_execution_profile(ep: str | None) -> str:
+    p = _norm_profile(ep)
+    if p in {"observe", "escalate", "document", "full_loop"}:
+        return p
+    return "observe"
+
+
+def _coerce_chat_workflow(wf: WorkflowType, ep: str | None) -> WorkflowType:
+    return _coerce_wf(wf, _normalize_execution_profile(ep))
 
 
 def _cluster_tasks(attach: list[str], onl: set[str]) -> list[AIModelTask]:
@@ -253,7 +268,7 @@ async def _models_catalog() -> AIModelsResponse:
             description=_local_desc(settings.local_llm_model_multimodal, onl, "查看报告、图片和附件"),
         ),
         AIModelOption(
-            id="custom_openai_local",
+            id="custom_local",
             name="自定义本地能力",
             provider="local",
             description=_local_desc(settings.local_llm_model_custom, onl, "接入自定义本地模型"),
