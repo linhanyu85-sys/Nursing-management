@@ -24,6 +24,7 @@ DEFAULT_ACCOUNTS: dict[str, dict[str, Any]] = {
         "role_code": "nurse",
         "department": "心内科病区",
         "title": "责任护士",
+        "status": "active",
     },
     "u_doctor_01": {
         "id": "u_doctor_01",
@@ -32,6 +33,7 @@ DEFAULT_ACCOUNTS: dict[str, dict[str, Any]] = {
         "role_code": "attending_doctor",
         "department": "心内科",
         "title": "主治医师",
+        "status": "active",
     },
     "u_resident_01": {
         "id": "u_resident_01",
@@ -40,6 +42,7 @@ DEFAULT_ACCOUNTS: dict[str, dict[str, Any]] = {
         "role_code": "resident_doctor",
         "department": "心内科",
         "title": "住院医师",
+        "status": "active",
     },
     "u_charge_01": {
         "id": "u_charge_01",
@@ -48,6 +51,7 @@ DEFAULT_ACCOUNTS: dict[str, dict[str, Any]] = {
         "role_code": "charge_nurse",
         "department": "心内科病区",
         "title": "护士长",
+        "status": "active",
     },
     "u_pharm_01": {
         "id": "u_pharm_01",
@@ -56,6 +60,7 @@ DEFAULT_ACCOUNTS: dict[str, dict[str, Any]] = {
         "role_code": "pharmacist",
         "department": "药学部",
         "title": "临床药师",
+        "status": "active",
     },
 }
 
@@ -184,13 +189,78 @@ class CollaborationStore:
         for account in self._accounts.values():
             if exclude_user_id and account.id == exclude_user_id:
                 continue
+            if str(account.status or "active") != "active":
+                continue
             if not q:
                 results.append(account)
                 continue
-            joined = f"{account.account} {account.full_name} {account.role_code} {account.department or ''}".lower()
+            joined = (
+                f"{account.account} {account.full_name} {account.role_code} "
+                f"{account.department or ''} {account.title or ''} {account.phone or ''} {account.email or ''}"
+            ).lower()
             if q in joined:
                 results.append(account)
         return sorted(results, key=lambda x: (x.role_code, x.full_name))[:50]
+
+    def list_accounts_admin(self, *, query: str = "", status_filter: str | None = None) -> list[AccountOut]:
+        q = (query or "").strip().lower()
+        status_value = (status_filter or "").strip().lower()
+        rows: list[AccountOut] = []
+        for account in self._accounts.values():
+            if status_value and str(account.status or "").lower() != status_value:
+                continue
+            if q:
+                joined = (
+                    f"{account.id} {account.account} {account.full_name} {account.role_code} "
+                    f"{account.department or ''} {account.title or ''} {account.phone or ''} {account.email or ''}"
+                ).lower()
+                if q not in joined:
+                    continue
+            rows.append(account)
+        return sorted(rows, key=lambda item: (item.role_code, item.full_name, item.account))
+
+    def upsert_account(
+        self,
+        *,
+        account_id: str | None,
+        account: str,
+        full_name: str,
+        role_code: str,
+        department: str | None = None,
+        title: str | None = None,
+        phone: str | None = None,
+        email: str | None = None,
+        status: str = "active",
+    ) -> AccountOut:
+        account_name = (account or "").strip()
+        if not account_name:
+            raise ValueError("account_required")
+
+        target_id = (account_id or "").strip()
+        existing: AccountOut | None = None
+        if target_id and target_id in self._accounts:
+            existing = self._accounts[target_id]
+        if existing is None:
+            for item in self._accounts.values():
+                if item.account.lower() == account_name.lower():
+                    existing = item
+                    break
+
+        record = AccountOut(
+            id=existing.id if existing else (target_id or f"u_{account_name}"),
+            account=account_name,
+            full_name=full_name,
+            role_code=role_code,
+            department=department,
+            title=title,
+            phone=phone,
+            email=email,
+            status=status or "active",
+        )
+        self._accounts[record.id] = record
+        self._contacts.setdefault(record.id, set())
+        self._save()
+        return record
 
     def list_contacts(self, user_id: str) -> list[AccountOut]:
         contact_ids = self._contacts.get(user_id, set())
@@ -337,6 +407,9 @@ class CollaborationStore:
             role_code="nurse",
             department="未知科室",
             title=None,
+            phone=None,
+            email=None,
+            status="active",
         )
         self._accounts[user_id] = new_account
         return new_account

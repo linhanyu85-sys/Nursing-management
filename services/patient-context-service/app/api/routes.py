@@ -2,7 +2,9 @@ from fastapi import APIRouter, HTTPException, Query, status
 
 from app.core.config import settings
 from app.schemas.patient import (
+    AdminPatientCaseRowOut,
     BedOverview,
+    DepartmentOptionOut,
     OrderCheckRequest,
     OrderExceptionRequest,
     OrderExecuteRequest,
@@ -13,6 +15,7 @@ from app.schemas.patient import (
     PatientCaseBundleOut,
     PatientCaseUpsertRequest,
     PatientContextOut,
+    WardAnalyticsOut,
 )
 from app.services.repository import repository
 
@@ -48,6 +51,39 @@ async def ward_beds(department_id: str) -> list[BedOverview]:
 @router.get("/wards/_all_beds", response_model=list[BedOverview])
 async def ward_beds_all() -> list[BedOverview]:
     return await repository.get_all_beds()
+
+
+@router.get("/admin/departments", response_model=list[DepartmentOptionOut])
+async def admin_departments() -> list[DepartmentOptionOut]:
+    return await repository.list_departments()
+
+
+@router.get("/admin/patient-cases", response_model=list[AdminPatientCaseRowOut])
+async def admin_patient_cases(
+    department_id: str | None = Query(default=None),
+    query: str = Query(default=""),
+    current_status: str | None = Query(default=None),
+    limit: int = Query(default=200, ge=1, le=500),
+) -> list[AdminPatientCaseRowOut]:
+    return await repository.list_admin_patient_cases(
+        department_id=department_id,
+        query=query,
+        current_status=current_status,
+        limit=limit,
+    )
+
+
+@router.get("/admin/patient-cases/{patient_id}", response_model=PatientCaseBundleOut)
+async def admin_patient_case(patient_id: str) -> PatientCaseBundleOut:
+    case_bundle = await repository.get_patient_case(patient_id)
+    if case_bundle is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="patient_case_not_found")
+    return case_bundle
+
+
+@router.get("/admin/ward-analytics", response_model=WardAnalyticsOut)
+async def admin_ward_analytics(department_id: str | None = Query(default=None)) -> WardAnalyticsOut:
+    return await repository.get_ward_analytics(department_id=department_id)
 
 
 @router.get("/patients/{patient_id}", response_model=PatientBase)

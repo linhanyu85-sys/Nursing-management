@@ -7,6 +7,7 @@ from fastapi import APIRouter, HTTPException, Query, status
 from app.core.config import settings
 from app.schemas.collab import (
     AccountOut,
+    AdminAccountUpsertRequest,
     AssistantDigestOut,
     AssistantDigestRequest,
     ContactAddRequest,
@@ -97,6 +98,29 @@ def search_accounts(
     exclude_user_id: str | None = Query(default=None),
 ) -> list[AccountOut]:
     return collaboration_store.search_accounts(query=query, exclude_user_id=exclude_user_id)
+
+
+@router.get("/collab/admin/accounts", response_model=list[AccountOut])
+def admin_list_accounts(query: str = Query(default=""), status_filter: str | None = Query(default=None)) -> list[AccountOut]:
+    return collaboration_store.list_accounts_admin(query=query, status_filter=status_filter)
+
+
+@router.post("/collab/admin/accounts/upsert", response_model=AccountOut)
+def admin_upsert_account(payload: AdminAccountUpsertRequest) -> AccountOut:
+    try:
+        return collaboration_store.upsert_account(
+            account_id=payload.id,
+            account=payload.account,
+            full_name=payload.full_name,
+            role_code=payload.role_code,
+            department=payload.department,
+            title=payload.title,
+            phone=payload.phone,
+            email=payload.email,
+            status=payload.status,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
 
 @router.get("/collab/contacts/{user_id}", response_model=ContactListOut)

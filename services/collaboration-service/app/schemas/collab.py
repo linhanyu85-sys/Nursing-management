@@ -69,6 +69,21 @@ class AccountOut(BaseModel):
     role_code: str
     department: str | None = None
     title: str | None = None
+    phone: str | None = None
+    email: str | None = None
+    status: str = "active"
+
+
+class AdminAccountUpsertRequest(BaseModel):
+    id: str | None = None
+    account: str
+    full_name: str
+    role_code: str
+    department: str | None = None
+    title: str | None = None
+    phone: str | None = None
+    email: str | None = None
+    status: str = "active"
 
 
 class ContactAddRequest(BaseModel):

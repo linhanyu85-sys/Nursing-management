@@ -70,6 +70,93 @@ async def admin_patient_case_upsert(payload: dict[str, Any]) -> Any:
     return await forward_json("POST", f"{settings.patient_context_service_url}/cases/upsert", payload=payload)
 
 
+@router.get("/api/admin/departments")
+async def admin_departments() -> Any:
+    return await forward_get(f"{settings.patient_context_service_url}/admin/departments")
+
+
+@router.get("/api/admin/patient-cases")
+async def admin_patient_cases(
+    department_id: str | None = Query(default=None),
+    query: str = Query(default=""),
+    current_status: str | None = Query(default=None),
+    limit: int = Query(default=200, ge=1, le=500),
+) -> Any:
+    params: dict[str, Any] = {"query": query, "limit": limit}
+    if department_id:
+        params["department_id"] = department_id
+    if current_status:
+        params["current_status"] = current_status
+    return await forward_get(f"{settings.patient_context_service_url}/admin/patient-cases", params=params)
+
+
+@router.get("/api/admin/patient-cases/{patient_id}")
+async def admin_patient_case_detail(patient_id: str) -> Any:
+    return await forward_get(f"{settings.patient_context_service_url}/admin/patient-cases/{patient_id}")
+
+
+@router.get("/api/admin/ward-analytics")
+async def admin_ward_analytics(department_id: str | None = Query(default=None)) -> Any:
+    params: dict[str, Any] = {}
+    if department_id:
+        params["department_id"] = department_id
+    return await forward_get(f"{settings.patient_context_service_url}/admin/ward-analytics", params=params or None)
+
+
+@router.get("/api/admin/accounts")
+async def admin_accounts(query: str = Query(default=""), status_filter: str | None = Query(default=None)) -> Any:
+    auth_users = await forward_get(
+        f"{settings.auth_service_url}/auth/admin/users",
+        params={"query": query, "status_filter": status_filter or ""},
+    )
+    collab_accounts = await forward_get(
+        f"{settings.collaboration_service_url}/collab/admin/accounts",
+        params={"query": query, "status_filter": status_filter or ""},
+    )
+    return _merge_admin_accounts(auth_users, collab_accounts)
+
+
+@router.post("/api/admin/accounts/upsert")
+async def admin_accounts_upsert(payload: dict[str, Any]) -> Any:
+    username = str(payload.get("username") or payload.get("account") or "").strip()
+    if not username:
+        raise HTTPException(status_code=400, detail="username_required")
+
+    auth_payload = {
+        "username": username,
+        "full_name": payload.get("full_name") or username,
+        "role_code": payload.get("role_code") or "nurse",
+        "password": payload.get("password"),
+        "phone": payload.get("phone"),
+        "email": payload.get("email"),
+        "department": payload.get("department"),
+        "title": payload.get("title"),
+        "status": payload.get("status") or "active",
+    }
+    auth_user = await forward_json(
+        "POST",
+        f"{settings.auth_service_url}/auth/admin/users/upsert",
+        payload=auth_payload,
+    )
+    collab_user = await forward_json(
+        "POST",
+        f"{settings.collaboration_service_url}/collab/admin/accounts/upsert",
+        payload={
+            "id": payload.get("id") or auth_user.get("id"),
+            "account": username,
+            "full_name": payload.get("full_name") or auth_user.get("full_name") or username,
+            "role_code": payload.get("role_code") or auth_user.get("role_code") or "nurse",
+            "department": payload.get("department"),
+            "title": payload.get("title"),
+            "phone": payload.get("phone"),
+            "email": payload.get("email"),
+            "status": payload.get("status") or auth_user.get("status") or "active",
+        },
+    )
+    merged = _merge_admin_accounts([auth_user], [collab_user])
+    return merged[0] if merged else {"username": username, **payload}
+
+
 @router.get("/api/orders/patients/{patient_id}")
 async def patient_orders(patient_id: str) -> Any:
     return await forward_get(f"{settings.patient_context_service_url}/patients/{patient_id}/orders")
@@ -817,6 +904,56 @@ async def _get_json(url: str, params: dict[str, Any] | None = None) -> dict[str,
             return rsp.json()
         except Exception:
             return None
+
+
+def _merge_admin_accounts(auth_users: Any, collab_accounts: Any) -> list[dict[str, Any]]:
+    auth_list = auth_users if isinstance(auth_users, list) else []
+    collab_list = collab_accounts if isinstance(collab_accounts, list) else []
+    merged: dict[str, dict[str, Any]] = {}
+
+    for item in auth_list:
+        if not isinstance(item, dict):
+            continue
+        username = str(item.get("username") or "").strip()
+        if not username:
+            continue
+        merged[username] = {
+            "id": item.get("id"),
+            "username": username,
+            "account": username,
+            "full_name": item.get("full_name") or username,
+            "role_code": item.get("role_code") or "nurse",
+            "phone": item.get("phone"),
+            "email": item.get("email"),
+            "department": item.get("department"),
+            "title": item.get("title"),
+            "status": item.get("status") or "active",
+        }
+
+    for item in collab_list:
+        if not isinstance(item, dict):
+            continue
+        username = str(item.get("account") or item.get("username") or "").strip()
+        if not username:
+            continue
+        row = merged.get(username, {"username": username, "account": username})
+        row.update(
+            {
+                "id": item.get("id") or row.get("id"),
+                "full_name": item.get("full_name") or row.get("full_name") or username,
+                "role_code": item.get("role_code") or row.get("role_code") or "nurse",
+                "department": item.get("department") if item.get("department") is not None else row.get("department"),
+                "title": item.get("title") if item.get("title") is not None else row.get("title"),
+                "phone": item.get("phone") if item.get("phone") is not None else row.get("phone"),
+                "email": item.get("email") if item.get("email") is not None else row.get("email"),
+                "status": item.get("status") or row.get("status") or "active",
+            }
+        )
+        merged[username] = row
+
+    rows = list(merged.values())
+    rows.sort(key=lambda item: (str(item.get("role_code") or ""), str(item.get("full_name") or ""), str(item.get("username") or "")))
+    return rows
 
 
 @router.websocket("/ws/patient-context/{patient_id}")

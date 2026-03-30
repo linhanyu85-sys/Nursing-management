@@ -78,6 +78,63 @@ class PatientCaseBundleOut(BaseModel):
     bed: BedOverview
 
 
+class DepartmentOptionOut(BaseModel):
+    id: str
+    code: str
+    name: str
+    ward_type: str
+    location: str | None = None
+
+
+class AdminPatientCaseRowOut(BaseModel):
+    patient_id: str
+    full_name: str
+    mrn: str
+    inpatient_no: str | None = None
+    gender: str | None = None
+    age: int | None = None
+    current_status: str
+    department_id: str | None = None
+    department_name: str | None = None
+    bed_no: str | None = None
+    room_no: str | None = None
+    risk_tags: list[str] = Field(default_factory=list)
+    pending_tasks: list[str] = Field(default_factory=list)
+    latest_observation: str | None = None
+    updated_at: datetime | None = None
+
+
+class AnalyticsKpiOut(BaseModel):
+    key: str
+    label: str
+    value: int
+    hint: str | None = None
+
+
+class DistributionItemOut(BaseModel):
+    label: str
+    value: int
+
+
+class WardHotspotOut(BaseModel):
+    bed_no: str
+    patient_name: str | None = None
+    score: int = 0
+    reasons: list[str] = Field(default_factory=list)
+    latest_observation: str | None = None
+
+
+class WardAnalyticsOut(BaseModel):
+    department_id: str | None = None
+    department_name: str
+    generated_at: datetime
+    kpis: list[AnalyticsKpiOut] = Field(default_factory=list)
+    status_distribution: list[DistributionItemOut] = Field(default_factory=list)
+    risk_distribution: list[DistributionItemOut] = Field(default_factory=list)
+    task_distribution: list[DistributionItemOut] = Field(default_factory=list)
+    hotspots: list[WardHotspotOut] = Field(default_factory=list)
+
+
 class OrderExecutionTrail(BaseModel):
     action: str
     actor: str

@@ -1,5 +1,8 @@
+from pathlib import Path
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 
 from app.api.routes import router
 from app.core.config import settings
@@ -19,3 +22,7 @@ app.add_middleware(
 )
 
 app.include_router(router)
+
+admin_web_dir = Path(__file__).resolve().parents[3] / "apps" / "admin-web"
+if admin_web_dir.exists():
+    app.mount("/admin", StaticFiles(directory=admin_web_dir, html=True), name="admin-web")

@@ -19,8 +19,14 @@ class RegisterRequest(BaseModel):
 
 class UserOut(BaseModel):
     id: str
+    username: str | None = None
     full_name: str
     role_code: str
+    phone: str | None = None
+    email: str | None = None
+    department: str | None = None
+    title: str | None = None
+    status: str = "active"
 
 
 class LoginResponse(BaseModel):
@@ -33,3 +39,15 @@ class LoginResponse(BaseModel):
 class RegisterResponse(BaseModel):
     ok: bool = True
     user: UserOut
+
+
+class AdminUserUpsertRequest(BaseModel):
+    username: str
+    full_name: str
+    role_code: str = "nurse"
+    password: str | None = None
+    phone: str | None = None
+    email: str | None = None
+    department: str | None = None
+    title: str | None = None
+    status: Literal["active", "inactive", "locked"] = "active"
