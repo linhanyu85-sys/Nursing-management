@@ -33,7 +33,7 @@ try {
   $ssh = New-SSHSession -ComputerName $ServerHost -Credential $credential -AcceptKey
   $sftp = New-SFTPSession -ComputerName $ServerHost -Credential $credential -AcceptKey
 
-  Invoke-SSHCommand -SessionId $ssh.SessionId -Command "mkdir -p '$RemoteDir' && mkdir -p /root/deploy_tmp" | Out-Null
+  Invoke-SSHCommand -SessionId $ssh.SessionId -Command "mkdir -p '$RemoteDir' && mkdir -p /root/deploy_tmp && rm -f /root/deploy_tmp/ai-nursing-server-bundle.zip /root/deploy_tmp/ai-nursing-server.env" | Out-Null
 
   Set-SFTPItem -SessionId $sftp.SessionId -Path $BundlePath -Destination "/root/deploy_tmp"
   Set-SFTPItem -SessionId $sftp.SessionId -Path $EnvFile -Destination "/root/deploy_tmp"
