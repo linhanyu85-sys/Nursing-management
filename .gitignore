@@ -1,0 +1,60 @@
+# Secrets and local env files
+.env
+.env.local
+.env.*
+**/.env
+**/.env.local
+**/.env.*
+!.env.example
+!.env.server.example
+!env.local.example
+!**/.env.example
+!**/.env.local.example
+!**/.env.server.example
+
+# Node / Expo
+node_modules/
+**/node_modules/
+.expo/
+**/.expo/
+.expo*.log
+**/.expo*.log
+.expo_*.log
+**/.expo_*.log
+
+# Python
+__pycache__/
+**/__pycache__/
+*.pyc
+.venv/
+**/.venv/
+venv/
+**/venv/
+
+# Build outputs
+build/
+**/build/
+dist/
+**/dist/
+*.apk
+*.aab
+
+# Local runtime data
+logs/
+data/
+.qoder/
+ai model/
+services/*/data/
+services/**/data/
+apps/mobile/
+firmware/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+
+# Local helper binaries / backups
+scripts/pip*.exe
+*.bak_*
+*.out.log
+*.err.log
