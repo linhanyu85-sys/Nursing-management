@@ -104,7 +104,7 @@ apt-get update
 apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
 systemctl enable --now docker
 
-docker compose --env-file "${ENV_FILE}" -f "${PROJECT_ROOT}/docker-compose.local.yml" up -d postgres qdrant nats minio
+docker compose --env-file "${ENV_FILE}" -f "${PROJECT_ROOT}/docker-compose.local.yml" up -d postgres qdrant nats minio pgadmin
 
 if [[ ! -d "${VENV_DIR}" ]]; then
   python3 -m venv "${VENV_DIR}"
@@ -140,3 +140,6 @@ echo
 echo "Runtime health:"
 curl -fsS http://127.0.0.1:18000/api/ai/runtime
 echo
+echo
+echo "pgAdmin URL:"
+echo "http://SERVER_IP:${PGADMIN_PORT:-5050}"
