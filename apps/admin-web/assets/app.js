@@ -1,6 +1,44 @@
 "use strict";
 
-const STORAGE_KEY = "ai_nursing_admin_console_v2";
+const STORAGE_KEY = "ai_nursing_admin_console_v3";
+
+const VIEW_TITLES = {
+  overview: "病区总览",
+  cases: "病例工作台",
+  accounts: "账号中心",
+  monitor: "联通监控",
+};
+
+const ROLE_OPTIONS = [
+  { value: "nurse", label: "责任护士" },
+  { value: "senior_nurse", label: "高年资护士" },
+  { value: "charge_nurse", label: "护士长" },
+  { value: "resident_doctor", label: "住院医师" },
+  { value: "attending_doctor", label: "主治医师" },
+  { value: "consultant", label: "会诊专家" },
+  { value: "pharmacist", label: "临床药师" },
+  { value: "admin", label: "系统管理员" },
+  { value: "auditor", label: "审计员" },
+];
+
+const ACCOUNT_STATUS_OPTIONS = [
+  { value: "active", label: "启用" },
+  { value: "inactive", label: "停用" },
+  { value: "locked", label: "锁定" },
+];
+
+const CASE_STATUS_OPTIONS = [
+  { value: "admitted", label: "在院" },
+  { value: "transferred", label: "转科" },
+  { value: "discharged", label: "出院" },
+];
+
+const OBSERVATION_FLAGS = [
+  { value: "normal", label: "正常" },
+  { value: "low", label: "偏低" },
+  { value: "high", label: "偏高" },
+  { value: "critical", label: "危急" },
+];
 
 function detectDefaultApiBase() {
   const isHttp = window.location.protocol === "http:" || window.location.protocol === "https:";
@@ -15,6 +53,7 @@ const DEFAULT_CFG = {
   departmentId: "",
   caseStatus: "",
   accountStatus: "",
+  operatorUsername: "",
 };
 
 const state = {
@@ -22,41 +61,28 @@ const state = {
   view: "overview",
   loading: false,
   search: "",
+  lastSyncAt: "",
+  searchTimer: null,
   departments: [],
   analytics: null,
   cases: [],
+  selectedCaseId: "",
   caseBundle: null,
   caseDraft: null,
-  caseActivity: { documents: [], recommendations: [], handovers: [] },
   accounts: [],
+  selectedAccountUsername: "",
   accountDraft: null,
   gatewayHealth: null,
-  runtime: null,
+  liveBeds: [],
   binding: null,
   sessions: [],
-  liveBeds: [],
-  wardSocket: null,
-  softRefreshTimer: null,
-  lastSyncAt: null,
-  monitorLogs: [],
 };
 
 const els = {};
 
-const ROLE_OPTIONS = [
-  "nurse",
-  "senior_nurse",
-  "charge_nurse",
-  "resident_doctor",
-  "attending_doctor",
-  "consultant",
-  "admin",
-  "auditor",
-];
-
 boot().catch((error) => {
   console.error(error);
-  toast(`初始化失败：${errorText(error)}`, "err");
+  toast("初始化失败", errorText(error), "err");
 });
 
 async function boot() {
@@ -65,6 +91,7 @@ async function boot() {
   syncConfigInputs();
   syncFilterInputs();
   setView(state.view);
+  render();
   await refreshAll({ init: true });
 }
 
@@ -86,10 +113,10 @@ function cacheEls() {
     "account-status-filter",
     "current-department-name",
     "current-department-meta",
-    "owner-avatar",
-    "owner-name",
-    "owner-id",
-    "status-ribbon",
+    "operator-name",
+    "operator-role",
+    "operator-select",
+    "system-strip",
     "toast-stack",
   ].forEach((id) => {
     els[id] = document.getElementById(id);
@@ -98,9 +125,9 @@ function cacheEls() {
 
 function bindStaticEvents() {
   els["nav-list"].addEventListener("click", (event) => {
-    const target = event.target.closest("[data-view]");
-    if (!target) return;
-    setView(target.dataset.view || "overview");
+    const button = event.target.closest("[data-view]");
+    if (!button) return;
+    setView(button.dataset.view || "overview");
     render();
   });
 
@@ -112,6 +139,13 @@ function bindStaticEvents() {
     syncConfigInputs();
     els["config-drawer"].classList.remove("hidden");
   });
+
+  els["config-drawer"].addEventListener("click", (event) => {
+    if (event.target === els["config-drawer"]) {
+      closeConfigDrawer();
+    }
+  });
+
   els["close-config-btn"].addEventListener("click", closeConfigDrawer);
   els["save-config-btn"].addEventListener("click", async () => {
     state.cfg.apiBase = String(els["cfg-api-base"].value || "").trim() || DEFAULT_CFG.apiBase;
@@ -120,25 +154,17 @@ function bindStaticEvents() {
     await refreshAll();
   });
 
-  els["global-search"].addEventListener("input", (event) => {
-    state.search = String(event.target.value || "").trim().toLowerCase();
-    render();
-  });
-
   els["department-select"].addEventListener("change", async (event) => {
     state.cfg.departmentId = String(event.target.value || "");
     saveConfig(state.cfg);
-    connectWardSocket();
     await refreshOperationalData({ keepSelection: true });
+    render();
   });
 
   els["case-status-filter"].addEventListener("change", async (event) => {
     state.cfg.caseStatus = String(event.target.value || "");
     saveConfig(state.cfg);
-    await refreshCases({ keepSelection: true });
-    if (state.view === "overview") {
-      await refreshAnalytics();
-    }
+    await Promise.all([refreshCases({ keepSelection: true }), refreshAnalytics()]);
     render();
   });
 
@@ -149,209 +175,246 @@ function bindStaticEvents() {
     render();
   });
 
+  els["operator-select"].addEventListener("change", (event) => {
+    setCurrentOperator(String(event.target.value || ""));
+  });
+
+  els["global-search"].addEventListener("input", (event) => {
+    state.search = String(event.target.value || "").trim();
+    scheduleSearchRefresh();
+  });
+
   document.addEventListener("click", async (event) => {
     const target = event.target.closest("[data-action]");
     if (!target) return;
-    const action = target.dataset.action || "";
-    if (action === "new-case") {
-      prepareNewCaseDraft();
-      render();
-      return;
-    }
-    if (action === "select-case") {
-      await selectCase(String(target.dataset.id || ""));
-      return;
-    }
-    if (action === "save-case") {
-      await saveCaseFromForm();
-      return;
-    }
-    if (action === "add-observation") {
-      state.caseDraft = collectCaseDraftFromDom();
-      state.caseDraft.latest_observations.push({ name: "", value: "", abnormal_flag: "" });
-      render();
-      return;
-    }
-    if (action === "remove-observation") {
-      const index = Number(target.dataset.index || -1);
-      if (index >= 0) {
+
+    const action = String(target.dataset.action || "");
+    try {
+      if (action === "new-case") {
+        prepareNewCaseDraft();
+        render();
+        return;
+      }
+      if (action === "select-case") {
+        await selectCase(String(target.dataset.id || ""));
+        return;
+      }
+      if (action === "save-case") {
+        await saveCaseFromForm();
+        return;
+      }
+      if (action === "add-observation") {
         state.caseDraft = collectCaseDraftFromDom();
-        state.caseDraft.latest_observations.splice(index, 1);
+        state.caseDraft.latest_observations.push({ name: "", value: "", abnormal_flag: "normal" });
+        render();
+        return;
+      }
+      if (action === "remove-observation") {
+        const index = Number(target.dataset.index || -1);
+        if (index >= 0) {
+          state.caseDraft = collectCaseDraftFromDom();
+          state.caseDraft.latest_observations.splice(index, 1);
+          if (!state.caseDraft.latest_observations.length) {
+            state.caseDraft.latest_observations.push({ name: "", value: "", abnormal_flag: "normal" });
+          }
+          render();
+        }
+        return;
+      }
+      if (action === "new-account") {
+        prepareNewAccountDraft();
+        render();
+        return;
+      }
+      if (action === "select-account") {
+        selectAccount(String(target.dataset.username || ""));
+        render();
+        return;
+      }
+      if (action === "save-account") {
+        await saveAccountFromForm();
+        return;
+      }
+      if (action === "set-operator") {
+        setCurrentOperator(String(target.dataset.username || ""));
+        return;
+      }
+      if (action === "clear-search") {
+        state.search = "";
+        els["global-search"].value = "";
+        await Promise.all([refreshCases({ keepSelection: true }), refreshAccounts({ keepSelection: true })]);
         render();
       }
-      return;
+    } catch (error) {
+      handleError(error);
     }
-    if (action === "new-account") {
-      prepareNewAccountDraft();
-      render();
-      return;
-    }
-    if (action === "select-account") {
-      selectAccount(String(target.dataset.username || ""));
-      render();
-      return;
-    }
-    if (action === "save-account") {
-      await saveAccountFromForm();
+  });
+
+  window.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") {
+      closeConfigDrawer();
     }
   });
 }
 
 function setView(view) {
   state.view = view;
-  const titleMap = {
-    overview: "病区总览",
-    cases: "病例工作台",
-    accounts: "账号中心",
-    monitor: "联通监控",
-  };
-  els["view-title"].textContent = titleMap[view] || "护理后台";
-  for (const button of Array.from(els["nav-list"].querySelectorAll("[data-view]"))) {
+  els["view-title"].textContent = VIEW_TITLES[view] || "后台管理";
+  Array.from(els["nav-list"].querySelectorAll("[data-view]")).forEach((button) => {
     button.classList.toggle("active", button.dataset.view === view);
-  }
+  });
 }
 
 async function refreshAll(options = {}) {
   state.loading = true;
   render();
-  await Promise.all([
-    refreshGatewayStatus(),
-    refreshDepartments({ init: Boolean(options.init) }),
-    refreshOperationalData({ keepSelection: true }),
-    refreshAccounts({ keepSelection: true }),
-  ]);
-  state.loading = false;
-  state.lastSyncAt = new Date().toISOString();
-  render();
+  try {
+    await refreshGatewayStatus();
+    await refreshDepartments();
+    await Promise.all([refreshAccounts({ keepSelection: !options.init }), refreshOperationalData({ keepSelection: !options.init })]);
+    ensureCurrentOperator();
+    state.lastSyncAt = new Date().toISOString();
+  } finally {
+    state.loading = false;
+    render();
+  }
 }
 
 async function refreshOperationalData(options = {}) {
-  await Promise.all([
-    refreshAnalytics(),
-    refreshCases({ keepSelection: Boolean(options.keepSelection) }),
-    refreshMonitorData(),
-  ]);
+  await Promise.all([refreshAnalytics(), refreshCases({ keepSelection: Boolean(options.keepSelection) }), refreshMonitorData()]);
 }
 
 async function refreshGatewayStatus() {
-  const [health, runtime] = await Promise.allSettled([api("/health"), api("/api/ai/runtime")]);
-  state.gatewayHealth = health.status === "fulfilled" ? health.value : null;
-  state.runtime = runtime.status === "fulfilled" ? runtime.value : null;
-  updateGatewayChip();
+  try {
+    state.gatewayHealth = await api("/health");
+  } catch (error) {
+    state.gatewayHealth = { status: "error", detail: errorText(error) };
+  }
 }
 
-async function refreshDepartments(options = {}) {
-  const departments = await api("/api/admin/departments");
-  state.departments = Array.isArray(departments) ? departments : [];
-  if (!state.cfg.departmentId && state.departments.length) {
-    state.cfg.departmentId = state.departments[0].id || state.departments[0].code || "";
-  }
-  if (options.init || !state.cfg.departmentId) {
+async function refreshDepartments() {
+  const departments = normalizeArray(await api("/api/admin/departments"));
+  state.departments = departments;
+  const validIds = new Set(departments.map((item) => item.id));
+  if (!validIds.has(state.cfg.departmentId)) {
+    state.cfg.departmentId = pickPreferredDepartment(departments)?.id || "";
     saveConfig(state.cfg);
   }
   syncDepartmentSelect();
-  updateDepartmentLabel();
-  connectWardSocket();
 }
 
 async function refreshAnalytics() {
-  if (!state.cfg.departmentId && !state.departments.length) {
+  if (!state.cfg.departmentId) {
     state.analytics = null;
     return;
   }
-  state.analytics = await api(`/api/admin/ward-analytics?department_id=${encodeURIComponent(state.cfg.departmentId || "")}`);
+  state.analytics = await api("/api/admin/ward-analytics", {
+    params: { department_id: state.cfg.departmentId },
+  });
 }
 
 async function refreshCases(options = {}) {
-  const previousId = options.keepSelection ? state.caseDraft?.patient_id || state.caseBundle?.patient?.id || "" : "";
-  const params = new URLSearchParams();
-  if (state.cfg.departmentId) params.set("department_id", state.cfg.departmentId);
-  if (state.cfg.caseStatus) params.set("current_status", state.cfg.caseStatus);
-  if (state.search) params.set("query", state.search);
-  params.set("limit", "240");
-  const rows = await api(`/api/admin/patient-cases?${params.toString()}`);
-  state.cases = Array.isArray(rows) ? rows : [];
-  if (state.cases.length === 0) {
-    state.caseBundle = null;
-    state.caseDraft = null;
+  if (!state.cfg.departmentId) {
+    state.cases = [];
+    prepareNewCaseDraft();
     return;
   }
-  const selectedId =
-    previousId ||
-    state.caseDraft?.patient_id ||
-    state.caseBundle?.patient?.id ||
-    state.cases[0].patient_id;
-  await selectCase(selectedId, { silent: true, allowFallback: true });
+
+  const rows = normalizeArray(
+    await api("/api/admin/patient-cases", {
+      params: {
+        department_id: state.cfg.departmentId,
+        query: state.search,
+        current_status: state.cfg.caseStatus,
+        limit: 200,
+      },
+    }),
+  );
+  state.cases = dedupeCases(rows).sort(compareCaseRows);
+
+  const nextId = options.keepSelection && state.selectedCaseId && state.cases.some((item) => item.patient_id === state.selectedCaseId)
+    ? state.selectedCaseId
+    : state.cases[0]?.patient_id || "";
+
+  if (nextId) {
+    await selectCase(nextId, { silent: true });
+  } else {
+    prepareNewCaseDraft();
+  }
 }
 
 async function refreshAccounts(options = {}) {
-  const previousUsername = options.keepSelection ? state.accountDraft?.username || "" : "";
-  const params = new URLSearchParams();
-  if (state.search) params.set("query", state.search);
-  if (state.cfg.accountStatus) params.set("status_filter", state.cfg.accountStatus);
-  const rows = await api(`/api/admin/accounts?${params.toString()}`);
-  state.accounts = Array.isArray(rows) ? rows : [];
-  if (state.accounts.length === 0) {
-    state.accountDraft = null;
-    updateOwnerCard();
-    return;
+  const rows = normalizeArray(
+    await api("/api/admin/accounts", {
+      params: {
+        query: state.search,
+        status_filter: state.cfg.accountStatus,
+      },
+    }),
+  );
+
+  state.accounts = rows.sort(compareAccounts);
+  ensureCurrentOperator();
+  syncOperatorSelect();
+
+  const nextUsername =
+    options.keepSelection && state.selectedAccountUsername && state.accounts.some((item) => item.username === state.selectedAccountUsername)
+      ? state.selectedAccountUsername
+      : state.cfg.operatorUsername || state.accounts[0]?.username || "";
+
+  if (nextUsername) {
+    selectAccount(nextUsername);
+  } else {
+    prepareNewAccountDraft();
   }
-  const selected = previousUsername || state.accountDraft?.username || state.accounts[0].username;
-  selectAccount(selected || state.accounts[0].username);
 }
 
 async function refreshMonitorData() {
-  const [bindingResult, sessionsResult] = await Promise.allSettled([
+  if (!state.cfg.departmentId) {
+    state.liveBeds = [];
+    return;
+  }
+
+  const [beds, binding, sessions] = await Promise.allSettled([
+    api(`/api/wards/${encodeURIComponent(state.cfg.departmentId)}/beds`),
     api("/api/device/binding"),
     api("/api/device/sessions"),
   ]);
-  state.binding = bindingResult.status === "fulfilled" ? bindingResult.value : null;
-  state.sessions =
-    sessionsResult.status === "fulfilled" && Array.isArray(sessionsResult.value?.sessions)
-      ? sessionsResult.value.sessions
-      : [];
+
+  state.liveBeds = beds.status === "fulfilled" ? normalizeArray(beds.value) : [];
+  state.binding = binding.status === "fulfilled" ? binding.value : { detail: errorText(binding.reason) };
+  state.sessions = sessions.status === "fulfilled" ? normalizeArray(sessions.value) : [];
 }
 
 async function selectCase(patientId, options = {}) {
-  const targetId = String(patientId || "").trim();
-  if (!targetId) return;
-  let found = state.cases.find((item) => item.patient_id === targetId);
-  if (!found && options.allowFallback) {
-    found = state.cases[0];
+  if (!patientId) {
+    prepareNewCaseDraft();
+    render();
+    return;
   }
-  if (!found) return;
 
-  const bundle = await api(`/api/admin/patient-cases/${encodeURIComponent(found.patient_id)}`);
-  state.caseBundle = bundle;
-  state.caseDraft = buildCaseDraft(bundle);
-  await refreshCaseActivity(found.patient_id);
-  render();
+  state.selectedCaseId = patientId;
+  state.caseBundle = await api(`/api/admin/patient-cases/${encodeURIComponent(patientId)}`);
+  state.caseDraft = bundleToCaseDraft(state.caseBundle);
   if (!options.silent) {
-    toast(`已载入病例：${bundle.patient.full_name}`, "ok");
+    render();
   }
 }
 
 function selectAccount(username) {
-  const account = state.accounts.find((item) => item.username === username || item.account === username);
-  if (!account) return;
-  state.accountDraft = buildAccountDraft(account);
-  updateOwnerCard();
-}
+  if (!username) {
+    prepareNewAccountDraft();
+    return;
+  }
 
-async function refreshCaseActivity(patientId) {
-  const [docs, recs, handovers] = await Promise.allSettled([
-    api(`/api/document/history?patient_id=${encodeURIComponent(patientId)}&limit=6`),
-    api(`/api/recommendation/${encodeURIComponent(patientId)}/history?limit=6`),
-    api(`/api/handover/${encodeURIComponent(patientId)}/history?limit=6`),
-  ]);
-  state.caseActivity = {
-    documents: docs.status === "fulfilled" && Array.isArray(docs.value) ? docs.value : [],
-    recommendations: recs.status === "fulfilled" && Array.isArray(recs.value) ? recs.value : [],
-    handovers: handovers.status === "fulfilled" && Array.isArray(handovers.value) ? handovers.value : [],
-  };
+  const account = state.accounts.find((item) => item.username === username);
+  if (!account) return;
+  state.selectedAccountUsername = username;
+  state.accountDraft = accountToDraft(account);
 }
 
 function prepareNewCaseDraft() {
+  state.selectedCaseId = "";
   state.caseBundle = null;
   state.caseDraft = {
     patient_id: "",
@@ -366,198 +429,298 @@ function prepareNewCaseDraft() {
     blood_type: "",
     allergy_info: "",
     current_status: "admitted",
-    diagnoses: [""],
-    risk_tags: [],
-    pending_tasks: [],
-    latest_observations: [{ name: "", value: "", abnormal_flag: "" }],
+    diagnosesText: "",
+    riskTagsText: "",
+    pendingTasksText: "",
+    latest_observations: [{ name: "", value: "", abnormal_flag: "normal" }],
   };
-  state.caseActivity = { documents: [], recommendations: [], handovers: [] };
 }
 
 function prepareNewAccountDraft() {
+  state.selectedAccountUsername = "";
   state.accountDraft = {
     id: "",
     username: "",
-    account: "",
     full_name: "",
     role_code: "nurse",
-    phone: "",
-    email: "",
     department: currentDepartment()?.name || "",
     title: "",
+    phone: "",
+    email: "",
     status: "active",
     password: "",
   };
-  updateOwnerCard();
 }
 
-function buildCaseDraft(bundle) {
+function bundleToCaseDraft(bundle) {
   const patient = bundle?.patient || {};
-  const bed = bundle?.bed || {};
   const context = bundle?.context || {};
+  const bed = bundle?.bed || {};
+  const observations = Array.isArray(context.latest_observations) && context.latest_observations.length
+    ? context.latest_observations.map((item) => ({
+        name: String(item?.name || ""),
+        value: String(item?.value || ""),
+        abnormal_flag: String(item?.abnormal_flag || "normal"),
+      }))
+    : [{ name: "", value: "", abnormal_flag: "normal" }];
+
   return {
-    patient_id: patient.id || "",
-    encounter_id: context.encounter_id || "",
-    bed_no: bed.bed_no || context.bed_no || "",
-    room_no: bed.room_no || "",
-    full_name: patient.full_name || "",
-    mrn: patient.mrn || "",
-    inpatient_no: patient.inpatient_no || "",
-    gender: patient.gender || "",
+    patient_id: String(patient.id || ""),
+    encounter_id: String(context.encounter_id || ""),
+    bed_no: String(bed.bed_no || context.bed_no || ""),
+    room_no: String(bed.room_no || ""),
+    full_name: String(patient.full_name || context.patient_name || ""),
+    mrn: String(patient.mrn || ""),
+    inpatient_no: String(patient.inpatient_no || ""),
+    gender: String(patient.gender || ""),
     age: patient.age ?? "",
-    blood_type: patient.blood_type || "",
-    allergy_info: patient.allergy_info || "",
-    current_status: patient.current_status || "admitted",
-    diagnoses: Array.isArray(context.diagnoses) && context.diagnoses.length ? context.diagnoses : [""],
-    risk_tags: Array.isArray(context.risk_tags) ? context.risk_tags : [],
-    pending_tasks: Array.isArray(context.pending_tasks) ? context.pending_tasks : [],
-    latest_observations:
-      Array.isArray(context.latest_observations) && context.latest_observations.length
-        ? context.latest_observations.map((item) => ({
-            name: item.name || "",
-            value: item.value || "",
-            abnormal_flag: item.abnormal_flag || "",
-          }))
-        : [{ name: "", value: "", abnormal_flag: "" }],
+    blood_type: String(patient.blood_type || ""),
+    allergy_info: String(patient.allergy_info || ""),
+    current_status: String(patient.current_status || "admitted"),
+    diagnosesText: listToText(context.diagnoses),
+    riskTagsText: listToText(context.risk_tags),
+    pendingTasksText: listToText(context.pending_tasks),
+    latest_observations: observations,
   };
 }
 
-function buildAccountDraft(account) {
+function accountToDraft(account) {
   return {
-    id: account.id || "",
-    username: account.username || account.account || "",
-    account: account.account || account.username || "",
-    full_name: account.full_name || "",
-    role_code: account.role_code || "nurse",
-    phone: account.phone || "",
-    email: account.email || "",
-    department: account.department || "",
-    title: account.title || "",
-    status: account.status || "active",
+    id: String(account.id || ""),
+    username: String(account.username || account.account || ""),
+    full_name: String(account.full_name || ""),
+    role_code: String(account.role_code || "nurse"),
+    department: String(account.department || ""),
+    title: String(account.title || ""),
+    phone: String(account.phone || ""),
+    email: String(account.email || ""),
+    status: String(account.status || "active"),
     password: "",
-  };
-}
-
-function collectCaseDraftFromDom() {
-  const draft = {
-    patient_id: fieldValue("case-patient-id"),
-    encounter_id: fieldValue("case-encounter-id"),
-    bed_no: fieldValue("case-bed-no"),
-    room_no: fieldValue("case-room-no"),
-    full_name: fieldValue("case-full-name"),
-    mrn: fieldValue("case-mrn"),
-    inpatient_no: fieldValue("case-inpatient-no"),
-    gender: fieldValue("case-gender"),
-    age: fieldValue("case-age"),
-    blood_type: fieldValue("case-blood-type"),
-    allergy_info: fieldValue("case-allergy-info"),
-    current_status: fieldValue("case-current-status") || "admitted",
-    diagnoses: parseLines(fieldValue("case-diagnoses")),
-    risk_tags: parseLines(fieldValue("case-risk-tags")),
-    pending_tasks: parseLines(fieldValue("case-pending-tasks")),
-    latest_observations: [],
-  };
-
-  for (const row of Array.from(document.querySelectorAll("[data-observation-row]"))) {
-    const name = row.querySelector("[data-observation-name]")?.value || "";
-    const value = row.querySelector("[data-observation-value]")?.value || "";
-    const abnormalFlag = row.querySelector("[data-observation-flag]")?.value || "";
-    if (!name && !value) continue;
-    draft.latest_observations.push({ name, value, abnormal_flag: abnormalFlag });
-  }
-  if (draft.latest_observations.length === 0) {
-    draft.latest_observations.push({ name: "", value: "", abnormal_flag: "" });
-  }
-  return draft;
-}
-
-function collectAccountDraftFromDom() {
-  return {
-    id: fieldValue("account-id"),
-    username: fieldValue("account-username"),
-    account: fieldValue("account-username"),
-    full_name: fieldValue("account-full-name"),
-    role_code: fieldValue("account-role-code") || "nurse",
-    phone: fieldValue("account-phone"),
-    email: fieldValue("account-email"),
-    department: fieldValue("account-department"),
-    title: fieldValue("account-title"),
-    status: fieldValue("account-status") || "active",
-    password: fieldValue("account-password"),
   };
 }
 
 async function saveCaseFromForm() {
   const draft = collectCaseDraftFromDom();
-  if (!draft.full_name || !draft.bed_no) {
-    toast("病例至少需要患者姓名和床位号", "warn");
+  if (!draft.full_name.trim()) {
+    toast("无法保存病例", "请先填写患者姓名。", "err");
     return;
   }
-  await api("/api/admin/patient-cases", {
+  if (!draft.bed_no.trim()) {
+    toast("无法保存病例", "请先填写床位号。", "err");
+    return;
+  }
+
+  const payload = {
+    patient_id: emptyToNull(draft.patient_id),
+    encounter_id: emptyToNull(draft.encounter_id),
+    bed_no: draft.bed_no.trim(),
+    room_no: emptyToNull(draft.room_no),
+    full_name: draft.full_name.trim(),
+    mrn: emptyToNull(draft.mrn),
+    inpatient_no: emptyToNull(draft.inpatient_no),
+    gender: emptyToNull(draft.gender),
+    age: numberOrNull(draft.age),
+    blood_type: emptyToNull(draft.blood_type),
+    allergy_info: emptyToNull(draft.allergy_info),
+    current_status: draft.current_status || "admitted",
+    diagnoses: parseTextList(draft.diagnosesText),
+    risk_tags: parseTextList(draft.riskTagsText),
+    pending_tasks: parseTextList(draft.pendingTasksText),
+    latest_observations: draft.latest_observations
+      .map((item) => ({
+        name: String(item.name || "").trim(),
+        value: String(item.value || "").trim(),
+        abnormal_flag: String(item.abnormal_flag || "normal"),
+      }))
+      .filter((item) => item.name || item.value),
+  };
+
+  const bundle = await api("/api/admin/patient-cases", {
     method: "POST",
-    body: {
-      patient_id: draft.patient_id || null,
-      encounter_id: draft.encounter_id || null,
-      bed_no: draft.bed_no,
-      room_no: draft.room_no || null,
-      full_name: draft.full_name,
-      mrn: draft.mrn || null,
-      inpatient_no: draft.inpatient_no || null,
-      gender: draft.gender || null,
-      age: draft.age === "" ? null : Number(draft.age || 0),
-      blood_type: draft.blood_type || null,
-      allergy_info: draft.allergy_info || null,
-      current_status: draft.current_status || "admitted",
-      diagnoses: draft.diagnoses,
-      risk_tags: draft.risk_tags,
-      pending_tasks: draft.pending_tasks,
-      latest_observations: draft.latest_observations.filter((item) => item.name || item.value),
-    },
+    body: payload,
   });
-  addMonitorLog("病例保存", `${draft.full_name} / ${draft.bed_no}床`);
-  toast("病例已保存到主系统", "ok");
-  await refreshOperationalData({ keepSelection: false });
+
+  state.caseBundle = bundle;
+  state.caseDraft = bundleToCaseDraft(bundle);
+  state.selectedCaseId = bundle?.patient?.id || state.selectedCaseId;
+  toast("病例已保存", "病例资料已写入系统，软件端会读取同一份数据。", "ok");
+
+  await Promise.all([refreshCases({ keepSelection: true }), refreshAnalytics(), refreshMonitorData()]);
+  render();
 }
 
 async function saveAccountFromForm() {
   const draft = collectAccountDraftFromDom();
-  if (!draft.username || !draft.full_name) {
-    toast("账号至少需要用户名和姓名", "warn");
+  if (!draft.username.trim()) {
+    toast("无法保存账号", "请先填写账号名。", "err");
     return;
   }
-  const result = await api("/api/admin/accounts/upsert", {
+  if (!draft.full_name.trim()) {
+    toast("无法保存账号", "请先填写显示姓名。", "err");
+    return;
+  }
+
+  const payload = {
+    id: emptyToNull(draft.id),
+    username: draft.username.trim(),
+    full_name: draft.full_name.trim(),
+    role_code: draft.role_code || "nurse",
+    department: emptyToNull(draft.department),
+    title: emptyToNull(draft.title),
+    phone: emptyToNull(draft.phone),
+    email: emptyToNull(draft.email),
+    status: draft.status || "active",
+    password: emptyToNull(draft.password),
+  };
+
+  const saved = await api("/api/admin/accounts/upsert", {
     method: "POST",
-    body: {
-      id: draft.id || null,
-      username: draft.username,
-      full_name: draft.full_name,
-      role_code: draft.role_code,
-      phone: draft.phone || null,
-      email: draft.email || null,
-      department: draft.department || null,
-      title: draft.title || null,
-      status: draft.status || "active",
-      password: draft.password || null,
-    },
+    body: payload,
   });
-  addMonitorLog("账号同步", `${draft.username} 已写入登录与协同服务`);
-  toast("账号已同步到软件登录与协同侧", "ok");
-  await refreshAccounts({ keepSelection: false });
-  if (result?.username) {
-    selectAccount(result.username);
-    render();
+
+  if (!state.cfg.operatorUsername || state.cfg.operatorUsername === payload.username) {
+    state.cfg.operatorUsername = payload.username;
+    saveConfig(state.cfg);
+  }
+
+  toast("账号已保存", "账号信息已同步到系统登录账号和协同账号。", "ok");
+  await refreshAccounts({ keepSelection: true });
+  selectAccount(String(saved.username || payload.username));
+  render();
+}
+
+function collectCaseDraftFromDom() {
+  const observations = Array.from(document.querySelectorAll("[data-observation-row]")).map((row) => ({
+    name: String(row.querySelector("[data-field='name']")?.value || ""),
+    value: String(row.querySelector("[data-field='value']")?.value || ""),
+    abnormal_flag: String(row.querySelector("[data-field='flag']")?.value || "normal"),
+  }));
+
+  return {
+    patient_id: valueOf("case-patient-id"),
+    encounter_id: valueOf("case-encounter-id"),
+    bed_no: valueOf("case-bed-no"),
+    room_no: valueOf("case-room-no"),
+    full_name: valueOf("case-full-name"),
+    mrn: valueOf("case-mrn"),
+    inpatient_no: valueOf("case-inpatient-no"),
+    gender: valueOf("case-gender"),
+    age: valueOf("case-age"),
+    blood_type: valueOf("case-blood-type"),
+    allergy_info: valueOf("case-allergy-info"),
+    current_status: valueOf("case-current-status"),
+    diagnosesText: valueOf("case-diagnoses"),
+    riskTagsText: valueOf("case-risk-tags"),
+    pendingTasksText: valueOf("case-pending-tasks"),
+    latest_observations: observations.length ? observations : [{ name: "", value: "", abnormal_flag: "normal" }],
+  };
+}
+
+function collectAccountDraftFromDom() {
+  return {
+    id: valueOf("account-id"),
+    username: valueOf("account-username"),
+    full_name: valueOf("account-full-name"),
+    role_code: valueOf("account-role"),
+    department: valueOf("account-department"),
+    title: valueOf("account-title"),
+    phone: valueOf("account-phone"),
+    email: valueOf("account-email"),
+    status: valueOf("account-status"),
+    password: valueOf("account-password"),
+  };
+}
+
+function scheduleSearchRefresh() {
+  clearTimeout(state.searchTimer);
+  state.searchTimer = setTimeout(() => {
+    Promise.all([refreshCases({ keepSelection: true }), refreshAccounts({ keepSelection: true })])
+      .then(() => render())
+      .catch(handleError);
+  }, 260);
+}
+
+function ensureCurrentOperator() {
+  if (!state.accounts.length) {
+    state.cfg.operatorUsername = "";
+    saveConfig(state.cfg);
+    return;
+  }
+
+  const hasSelected = state.accounts.some((item) => item.username === state.cfg.operatorUsername);
+  if (!hasSelected) {
+    state.cfg.operatorUsername = state.accounts.find((item) => item.status === "active")?.username || state.accounts[0].username;
+    saveConfig(state.cfg);
   }
 }
 
+function setCurrentOperator(username) {
+  if (!username) return;
+  state.cfg.operatorUsername = username;
+  saveConfig(state.cfg);
+  syncOperatorSelect();
+  render();
+  toast("已切换当前操作账号", `${operatorLabel(getCurrentOperator())}`, "ok");
+}
+
+function syncDepartmentSelect() {
+  const options = state.departments
+    .map((item) => `<option value="${escapeAttr(item.id)}">${escapeHtml(item.name)}${item.location ? ` · ${escapeHtml(item.location)}` : ""}</option>`)
+    .join("");
+  els["department-select"].innerHTML = options;
+  els["department-select"].value = state.cfg.departmentId || "";
+}
+
+function syncOperatorSelect() {
+  const options = state.accounts
+    .map((item) => {
+      const suffix = item.status && item.status !== "active" ? ` · ${accountStatusLabel(item.status)}` : "";
+      return `<option value="${escapeAttr(item.username)}">${escapeHtml(operatorLabel(item))}${suffix}</option>`;
+    })
+    .join("");
+  els["operator-select"].innerHTML = options || `<option value="">暂无可切换账号</option>`;
+  els["operator-select"].value = state.cfg.operatorUsername || "";
+}
+
+function syncConfigInputs() {
+  els["cfg-api-base"].value = state.cfg.apiBase || DEFAULT_CFG.apiBase;
+}
+
+function syncFilterInputs() {
+  els["global-search"].value = state.search;
+  els["case-status-filter"].value = state.cfg.caseStatus || "";
+  els["account-status-filter"].value = state.cfg.accountStatus || "";
+}
+
+function updateHeaderMeta() {
+  const department = currentDepartment();
+  els["current-department-name"].textContent = department?.name || "未选择病区";
+  els["current-department-meta"].textContent = department
+    ? `${department.code} · ${department.location || "未记录位置"}`
+    : "请先选择需要管理的病区";
+
+  const operator = getCurrentOperator();
+  els["operator-name"].textContent = operator ? operator.full_name || operator.username : "未选择";
+  els["operator-role"].textContent = operator
+    ? `${roleLabel(operator.role_code)} · ${operator.department || "未填写科室"}`
+    : "请在顶部切换当前操作账号";
+
+  const status = gatewayStatusInfo();
+  els["gateway-status"].textContent = status.label;
+  els["gateway-status"].className = `status-chip ${status.tone}`;
+}
+
 function render() {
-  renderStatusRibbon();
-  updateDepartmentLabel();
-  updateOwnerCard();
-  if (state.loading) {
+  syncFilterInputs();
+  syncOperatorSelect();
+  updateHeaderMeta();
+  renderSystemStrip();
+
+  if (state.loading && !state.departments.length && !state.accounts.length) {
     els["view-root"].innerHTML = `
       <div class="loading-state">
         <div class="spinner"></div>
-        <p>正在同步后台管理数据...</p>
+        <p>正在加载后台管理数据，请稍候...</p>
       </div>
     `;
     return;
@@ -578,715 +741,652 @@ function render() {
   els["view-root"].innerHTML = renderMonitorView();
 }
 
+function renderSystemStrip() {
+  const department = currentDepartment();
+  const operator = getCurrentOperator();
+  const caseCount = state.cases.length;
+  const accountCount = state.accounts.length;
+  const syncLabel = state.lastSyncAt ? formatDateTime(state.lastSyncAt) : "尚未同步";
+  const health = gatewayStatusInfo();
+
+  els["system-strip"].innerHTML = [
+    renderSystemPill("当前病区", department?.name || "未选择", department?.location || "请先选择病区"),
+    renderSystemPill("当前操作账号", operator?.full_name || "未选择", operator ? `${roleLabel(operator.role_code)} · ${operator.username}` : "可在顶部随时切换"),
+    renderSystemPill("已载入病例", String(caseCount), caseCount ? "左侧列表与编辑区保持同一数据源" : "当前病区暂无病例"),
+    renderSystemPill("可管理账号", String(accountCount), accountCount ? "账号编辑后会同步到软件账户数据" : "暂无账号数据"),
+    renderSystemPill("网关状态", health.short, health.detail),
+    renderSystemPill("最近同步", syncLabel, "点击右上角刷新可重新拉取最新状态"),
+  ].join("");
+}
+
+function renderSystemPill(label, value, meta) {
+  return `
+    <article class="system-pill">
+      <span>${escapeHtml(label)}</span>
+      <strong>${escapeHtml(value)}</strong>
+      <span>${escapeHtml(meta)}</span>
+    </article>
+  `;
+}
+
 function renderOverviewView() {
   const analytics = state.analytics;
-  if (!analytics) {
-    return `<div class="empty-state"><p>暂无病区分析数据，请先检查病区与网关配置。</p></div>`;
-  }
-  const kpis = Array.isArray(analytics.kpis) ? analytics.kpis : [];
-  const primary = kpis.slice(0, 4);
+  const kpis = analytics?.kpis || [];
+  const hotspots = analytics?.hotspots || [];
+  const beds = state.liveBeds.slice(0, 12);
+
   return `
-    <section class="hero-surface">
-      <div class="hero-copy">
-        <div class="eyebrow">Ward Intelligence</div>
-        <h3>${escapeHtml(analytics.department_name || "病区总览")} 正在以同一套业务数据驱动软件端与后台端</h3>
-        <p>后台改病例、改账号、改病区数据后，软件端会直接读取同一套服务数据源。当前总览把病区占床、风险压力、待办负荷和热点床位收拢到一屏完成判断。</p>
-        <div class="kpi-strip">
-          ${primary.map(renderKpiItem).join("")}
-        </div>
-      </div>
-      <div class="hero-stat-grid">
-        ${kpis.slice(0, 4).map(renderHeroStat).join("")}
-      </div>
-    </section>
-
-    <section class="overview-grid">
-      <div class="stack">
-        <article class="surface">
-          <div class="surface-head">
-            <div>
-              <div class="eyebrow">Distribution</div>
-              <h3>病区状态分布</h3>
-              <p>按患者状态、风险观测和任务状态快速判断病区压力结构。</p>
-            </div>
-          </div>
-          <div class="stack">
-            ${renderDistributionBlock("患者状态", analytics.status_distribution)}
-            ${renderDistributionBlock("异常观测", analytics.risk_distribution)}
-            ${renderDistributionBlock("任务队列", analytics.task_distribution)}
-          </div>
-        </article>
-
-        <article class="surface">
-          <div class="surface-head">
-            <div>
-              <div class="eyebrow">Live Beds</div>
-              <h3>当前在床视图</h3>
-              <p>这里优先展示当前病区的占床患者，作为病例工作台的入口。</p>
-            </div>
-          </div>
-          <div class="bed-strip">
-            ${state.cases.slice(0, 12).map(renderBedTile).join("") || `<div class="empty-copy">当前病区暂无病例。</div>`}
-          </div>
-        </article>
-      </div>
-
-      <article class="surface">
-        <div class="surface-head">
+    <section class="dashboard-grid">
+      <article class="panel panel-span-8">
+        <div class="panel-header">
           <div>
-            <div class="eyebrow">Hotspots</div>
-            <h3>病区热点床位</h3>
-            <p>按异常观测和待办任务叠加排序，优先暴露最需要管理层介入的位置。</p>
+            <h3>病区运行概况</h3>
+            <p>用更接近护理站后台的方式看病区容量、待办压力和重点床位。</p>
           </div>
-          <div class="soft-pill ok">${fmtTime(analytics.generated_at)}</div>
         </div>
-        <div class="hotspot-list">
-          ${(analytics.hotspots || []).map(renderHotspot).join("") || `<div class="empty-copy">暂无热点床位。</div>`}
+        ${kpis.length ? `
+          <div class="kpi-grid">
+            ${kpis.map((item) => `
+              <section class="kpi-card">
+                <div class="kpi-label">${escapeHtml(item.label || item.key)}</div>
+                <div class="kpi-value">${escapeHtml(String(item.value ?? 0))}</div>
+                <div class="kpi-hint">${escapeHtml(item.hint || "—")}</div>
+              </section>
+            `).join("")}
+          </div>
+        ` : renderInlineEmpty("当前病区暂无总览统计。")}
+      </article>
+
+      <article class="panel panel-span-4">
+        <div class="panel-header">
+          <div>
+            <h3>当前工作环境</h3>
+            <p>固定显示当前病区、操作账号和后台联通状态。</p>
+          </div>
         </div>
+        <div class="fact-list">
+          ${renderFactRow("病区", currentDepartment()?.name || "未选择")}
+          ${renderFactRow("位置", currentDepartment()?.location || "未记录")}
+          ${renderFactRow("操作账号", operatorLabel(getCurrentOperator()) || "未选择")}
+          ${renderFactRow("账号角色", roleLabel(getCurrentOperator()?.role_code))}
+          ${renderFactRow("最近同步", state.lastSyncAt ? formatDateTime(state.lastSyncAt) : "尚未同步")}
+          ${renderFactRow("设备网关", monitorStateLabel(state.binding))}
+        </div>
+      </article>
+
+      <article class="panel panel-span-4">
+        <div class="panel-header">
+          <div>
+            <h3>患者状态分布</h3>
+            <p>一眼看清在院、转科、出院结构。</p>
+          </div>
+        </div>
+        ${renderDistributionList(analytics?.status_distribution || [])}
+      </article>
+
+      <article class="panel panel-span-4">
+        <div class="panel-header">
+          <div>
+            <h3>风险标签分布</h3>
+            <p>用于判断当前病区是否存在集中预警。</p>
+          </div>
+        </div>
+        ${renderDistributionList(analytics?.risk_distribution || [])}
+      </article>
+
+      <article class="panel panel-span-4">
+        <div class="panel-header">
+          <div>
+            <h3>待办任务分布</h3>
+            <p>把处理压力和待办量压缩成易读的条目。</p>
+          </div>
+        </div>
+        ${renderDistributionList(analytics?.task_distribution || [])}
+      </article>
+
+      <article class="panel panel-span-7">
+        <div class="panel-header">
+          <div>
+            <h3>重点床位</h3>
+            <p>按待办数和异常观测排序，便于班次交接时快速扫读。</p>
+          </div>
+        </div>
+        ${hotspots.length ? `
+          <div class="data-table hotspot-table">
+            <div class="table-head">
+              <div>床位</div>
+              <div>患者</div>
+              <div>分值</div>
+              <div>提醒原因</div>
+            </div>
+            ${hotspots.map((item) => `
+              <div class="table-row">
+                <div class="mini-stack">
+                  <strong>${escapeHtml(item.bed_no || "—")}</strong>
+                  <span class="tiny-text">${escapeHtml(observationLevelLabel(item.latest_observation))}</span>
+                </div>
+                <div class="mini-stack">
+                  <strong>${escapeHtml(item.patient_name || "未绑定患者")}</strong>
+                  <span class="tiny-text">${escapeHtml(item.latest_observation || "暂无最新观察")}</span>
+                </div>
+                <div><span class="row-flag ${toneClassByScore(item.score)}">${escapeHtml(String(item.score ?? 0))}</span></div>
+                <div>${escapeHtml((item.reasons || []).join("；") || "暂无原因")}</div>
+              </div>
+            `).join("")}
+          </div>
+        ` : renderInlineEmpty("当前病区暂无重点床位。")}
+      </article>
+
+      <article class="panel panel-span-5">
+        <div class="panel-header">
+          <div>
+            <h3>床位占用快照</h3>
+            <p>保留一页能扫完的床位视图，不再堆很多卡片。</p>
+          </div>
+        </div>
+        ${beds.length ? `
+          <div class="data-table bed-table">
+            <div class="table-head">
+              <div>床位</div>
+              <div>患者</div>
+              <div>状态</div>
+              <div>待办</div>
+            </div>
+            ${beds.map((bed) => `
+              <div class="table-row">
+                <div class="mini-stack">
+                  <strong>${escapeHtml(bed.bed_no || "—")}</strong>
+                  <span class="tiny-text">${escapeHtml(bed.room_no || "—")} 房</span>
+                </div>
+                <div>${escapeHtml(bed.patient_name || "空床")}</div>
+                <div><span class="row-flag ${bed.status === "occupied" ? "is-good" : "is-neutral"}">${escapeHtml(bedStatusLabel(bed.status))}</span></div>
+                <div>${escapeHtml((bed.pending_tasks || []).slice(0, 2).join("；") || "无")}</div>
+              </div>
+            `).join("")}
+          </div>
+        ` : renderInlineEmpty("当前病区暂无床位数据。")}
       </article>
     </section>
   `;
 }
 
 function renderCasesView() {
+  const draft = state.caseDraft || {};
+  const cases = state.cases;
+  const inHospital = cases.filter((item) => item.current_status === "admitted").length;
+  const pendingCount = cases.filter((item) => (item.pending_tasks || []).length > 0).length;
+
   return `
-    <section class="cases-layout">
-      <aside class="sidebar-surface">
-        <div class="surface-head">
-          <div>
-            <div class="eyebrow">Patient Cases</div>
-            <h3>病例列表</h3>
-            <p>选择患者后可直接修改病例、风险标签、待办和观察值。</p>
+    <section class="workspace-shell">
+      <aside class="workspace-sidebar">
+        <div class="sidebar-head">
+          <div class="sidebar-head-row">
+            <div>
+              <h3 class="sidebar-title">病例列表</h3>
+              <p class="sidebar-subtitle">左边只保留扫描、选择和新建，右边专心编辑，不再把一堆分析卡片塞进同一页。</p>
+            </div>
+            <button class="action-btn" data-action="new-case">新建病例</button>
           </div>
-          <button class="secondary-btn" data-action="new-case">
-            <span class="material-symbols-outlined">add</span>
-            <span>新建病例</span>
-          </button>
+          <div class="sidebar-metrics">
+            <span class="metric-chip is-neutral">共 ${cases.length} 例</span>
+            <span class="metric-chip is-good">在院 ${inHospital} 例</span>
+            <span class="metric-chip ${pendingCount ? "is-warn" : "is-good"}">有待办 ${pendingCount} 例</span>
+            ${state.search ? `<button class="mini-btn" data-action="clear-search">清空检索</button>` : ""}
+          </div>
         </div>
-        <div class="sidebar-scroll">
-          ${(filteredCases().map(renderCaseRow).join("")) || `<div class="empty-copy">没有匹配到病例。</div>`}
+
+        <div class="record-list">
+          ${cases.length ? cases.map((item) => renderCaseRow(item)).join("") : `
+            <div class="empty-state">
+              <div>当前筛选条件下没有病例。</div>
+              <div class="empty-hint">可以切换病区、调整检索条件，或直接新建病例。</div>
+            </div>
+          `}
         </div>
       </aside>
 
-      <section class="surface">
-        <div class="surface-head">
-          <div>
-            <div class="eyebrow">Case Editor</div>
-            <h3>${escapeHtml(state.caseDraft?.full_name || "新建病例")}</h3>
-            <p>保存后会直接写入主系统病例库，软件端读取相同数据时会立即看到变化。</p>
-          </div>
-          <div class="inline-actions">
-            <button class="ghost-btn" data-action="new-case">
-              <span class="material-symbols-outlined">edit_square</span>
-              <span>重置表单</span>
-            </button>
-            <button class="primary-btn" data-action="save-case">
-              <span class="material-symbols-outlined">save</span>
-              <span>保存到主系统</span>
-            </button>
+      <article class="editor-shell">
+        <div class="editor-topbar">
+          <div class="editor-head-row">
+            <div>
+              <div class="section-kicker">病例编辑</div>
+              <h3 class="editor-title">${escapeHtml(draft.full_name || "新建病例")}</h3>
+              <p class="editor-subtitle">修改后的病例会直接写回系统病例库，软件端读取同一患者数据时会同步看到变化。</p>
+            </div>
+            <div class="editor-actions">
+              <div class="operator-hint">当前操作账号：${escapeHtml(operatorLabel(getCurrentOperator()) || "未选择")}</div>
+              <button class="action-btn" data-action="save-case">保存病例</button>
+            </div>
           </div>
         </div>
-        ${renderCaseForm()}
-      </section>
+
+        <div class="editor-form">
+          <section class="form-section">
+            <div class="form-section-header">
+              <div>
+                <h4>住院基本信息</h4>
+                <div class="section-help">把基础识别信息放在一组里，避免左右来回找字段。</div>
+              </div>
+            </div>
+            <div class="form-grid">
+              ${renderField("病例 ID", "case-patient-id", draft.patient_id, { readonly: true })}
+              ${renderField("就诊 ID", "case-encounter-id", draft.encounter_id)}
+              ${renderField("床位号", "case-bed-no", draft.bed_no)}
+              ${renderField("房间号", "case-room-no", draft.room_no)}
+              ${renderField("姓名", "case-full-name", draft.full_name)}
+              ${renderField("病历号 MRN", "case-mrn", draft.mrn)}
+              ${renderField("住院号", "case-inpatient-no", draft.inpatient_no)}
+              ${renderField("性别", "case-gender", draft.gender)}
+              ${renderField("年龄", "case-age", draft.age, { type: "number" })}
+              ${renderField("血型", "case-blood-type", draft.blood_type)}
+              ${renderSelectField("当前状态", "case-current-status", draft.current_status, CASE_STATUS_OPTIONS)}
+              ${renderField("当前病区", "case-department", currentDepartment()?.name || "未选择病区", { readonly: true })}
+              ${renderTextareaField("过敏信息", "case-allergy-info", draft.allergy_info, { full: true, placeholder: "如：头孢过敏、青霉素过敏" })}
+            </div>
+          </section>
+
+          <section class="form-section">
+            <div class="form-section-header">
+              <div>
+                <h4>诊断、风险与待办</h4>
+                <div class="section-help">统一用可编辑文本区承载结构化内容，支持按行维护。</div>
+              </div>
+            </div>
+            <div class="form-grid">
+              ${renderTextareaField("诊断列表", "case-diagnoses", draft.diagnosesText, { placeholder: "每行一条诊断" })}
+              ${renderTextareaField("风险标签", "case-risk-tags", draft.riskTagsText, { placeholder: "每行一条风险标签" })}
+              ${renderTextareaField("待办任务", "case-pending-tasks", draft.pendingTasksText, { full: true, placeholder: "每行一条待办任务" })}
+            </div>
+          </section>
+
+          <section class="form-section">
+            <div class="form-section-header">
+              <div>
+                <h4>最新观察</h4>
+                <div class="section-help">保留最常用的三列：指标、结果、异常级别。</div>
+              </div>
+              <button class="action-btn-secondary" data-action="add-observation">新增观察</button>
+            </div>
+            <div class="observation-table">
+              <div class="observation-head">
+                <div>观察项</div>
+                <div>结果</div>
+                <div>异常级别</div>
+                <div>操作</div>
+              </div>
+              ${(draft.latest_observations || []).map((item, index) => `
+                <div class="observation-row" data-observation-row="${index}">
+                  <input data-field="name" value="${escapeAttr(item.name || "")}" placeholder="如：血糖" />
+                  <input data-field="value" value="${escapeAttr(item.value || "")}" placeholder="如：16.2 mmol/L" />
+                  <select data-field="flag">
+                    ${OBSERVATION_FLAGS.map((flag) => `<option value="${flag.value}" ${flag.value === (item.abnormal_flag || "normal") ? "selected" : ""}>${flag.label}</option>`).join("")}
+                  </select>
+                  <button class="mini-btn" data-action="remove-observation" data-index="${index}">移除</button>
+                </div>
+              `).join("")}
+            </div>
+          </section>
+        </div>
+      </article>
     </section>
-  `;
-}
-
-function renderCaseForm() {
-  const draft = state.caseDraft;
-  if (!draft) {
-    return `<div class="empty-copy">请选择一个病例，或点击“新建病例”。</div>`;
-  }
-  const observations =
-    Array.isArray(draft.latest_observations) && draft.latest_observations.length
-      ? draft.latest_observations
-      : [{ name: "", value: "", abnormal_flag: "" }];
-
-  return `
-    <div class="stack">
-      <div class="form-grid">
-        <label class="field"><span>患者ID</span><input id="case-patient-id" value="${escapeAttr(draft.patient_id || "")}" placeholder="新建时可留空" /></label>
-        <label class="field"><span>就诊ID</span><input id="case-encounter-id" value="${escapeAttr(draft.encounter_id || "")}" placeholder="可留空" /></label>
-        <label class="field"><span>床位号</span><input id="case-bed-no" value="${escapeAttr(draft.bed_no || "")}" placeholder="例如 12" /></label>
-        <label class="field"><span>房间号</span><input id="case-room-no" value="${escapeAttr(draft.room_no || "")}" placeholder="例如 612" /></label>
-        <label class="field"><span>姓名</span><input id="case-full-name" value="${escapeAttr(draft.full_name || "")}" /></label>
-        <label class="field"><span>病历号 MRN</span><input id="case-mrn" value="${escapeAttr(draft.mrn || "")}" /></label>
-        <label class="field"><span>住院号</span><input id="case-inpatient-no" value="${escapeAttr(draft.inpatient_no || "")}" /></label>
-        <label class="field"><span>性别</span><input id="case-gender" value="${escapeAttr(draft.gender || "")}" /></label>
-        <label class="field"><span>年龄</span><input id="case-age" type="number" min="0" value="${escapeAttr(draft.age === "" ? "" : String(draft.age || ""))}" /></label>
-        <label class="field"><span>血型</span><input id="case-blood-type" value="${escapeAttr(draft.blood_type || "")}" /></label>
-        <label class="field"><span>当前状态</span>
-          <select id="case-current-status">
-            ${["admitted", "transferred", "discharged"].map((item) => `<option value="${item}" ${draft.current_status === item ? "selected" : ""}>${item}</option>`).join("")}
-          </select>
-        </label>
-        <label class="field full"><span>过敏信息</span><textarea id="case-allergy-info" class="compact" placeholder="例如：青霉素过敏">${escapeHtml(draft.allergy_info || "")}</textarea></label>
-      </div>
-
-      <div class="section-block">
-        <div class="section-title">
-          <h4>诊断、风险与待办</h4>
-          <div class="helper-text">一行一项，保存时直接写入病例任务和诊断表。</div>
-        </div>
-        <div class="form-grid">
-          <label class="field"><span>诊断列表</span><textarea id="case-diagnoses" class="compact">${escapeHtml(draft.diagnoses.join("\n"))}</textarea></label>
-          <label class="field"><span>风险标签</span><textarea id="case-risk-tags" class="compact">${escapeHtml(draft.risk_tags.join("\n"))}</textarea></label>
-          <label class="field full"><span>待办任务</span><textarea id="case-pending-tasks" class="compact">${escapeHtml(draft.pending_tasks.join("\n"))}</textarea></label>
-        </div>
-      </div>
-
-      <div class="section-block">
-        <div class="section-title">
-          <h4>最新观察值</h4>
-          <div class="inline-actions">
-            <div class="helper-text">名称 / 数值 / 异常标记</div>
-            <button class="secondary-btn" data-action="add-observation">
-              <span class="material-symbols-outlined">add</span>
-              <span>新增观察</span>
-            </button>
-          </div>
-        </div>
-        <div class="obs-grid">
-          ${observations.map((item, index) => renderObservationRow(item, index)).join("")}
-        </div>
-      </div>
-
-      <div class="section-block">
-        <div class="section-title">
-          <h4>关联业务输出</h4>
-          <div class="helper-text">展示与当前病例关联的软件端文书、推荐和交班结果。</div>
-        </div>
-        <div class="activity-list">
-          ${renderActivityCard("文书草稿", state.caseActivity?.documents || [], (item) => item.document_type || "文书")}
-          ${renderActivityCard("推荐结果", state.caseActivity?.recommendations || [], (item) => item.summary || "推荐结果")}
-          ${renderActivityCard("交班记录", state.caseActivity?.handovers || [], (item) => item.summary || "交班记录")}
-        </div>
-      </div>
-    </div>
-  `;
-}
-
-function renderObservationRow(item, index) {
-  return `
-    <div class="obs-row" data-observation-row="${index}">
-      <input data-observation-name value="${escapeAttr(item.name || "")}" placeholder="例如 血压" />
-      <input data-observation-value value="${escapeAttr(item.value || "")}" placeholder="例如 88/56 mmHg" />
-      <select data-observation-flag>
-        ${["", "normal", "high", "low", "critical"].map((flag) => `<option value="${flag}" ${String(item.abnormal_flag || "") === flag ? "selected" : ""}>${flag || "无标记"}</option>`).join("")}
-      </select>
-      <button class="tiny-btn" data-action="remove-observation" data-index="${index}">
-        <span class="material-symbols-outlined">delete</span>
-      </button>
-    </div>
   `;
 }
 
 function renderAccountsView() {
+  const draft = state.accountDraft || {};
+  const activeCount = state.accounts.filter((item) => item.status === "active").length;
+  const operator = getCurrentOperator();
+
   return `
-    <section class="accounts-layout">
-      <aside class="sidebar-surface">
-        <div class="surface-head">
-          <div>
-            <div class="eyebrow">Software Accounts</div>
-            <h3>软件账号</h3>
-            <p>这里管理的是软件登录账号与协同账号的同步视图。</p>
+    <section class="workspace-shell">
+      <aside class="workspace-sidebar">
+        <div class="sidebar-head">
+          <div class="sidebar-head-row">
+            <div>
+              <h3 class="sidebar-title">账号列表</h3>
+              <p class="sidebar-subtitle">账号编辑和当前操作账号切换拆开处理，避免“我到底是在改账号，还是在切换视角”这种混乱。</p>
+            </div>
+            <button class="action-btn" data-action="new-account">新建账号</button>
           </div>
-          <button class="secondary-btn" data-action="new-account">
-            <span class="material-symbols-outlined">person_add</span>
-            <span>新建账号</span>
-          </button>
+          <div class="sidebar-metrics">
+            <span class="metric-chip is-neutral">共 ${state.accounts.length} 个</span>
+            <span class="metric-chip is-good">启用 ${activeCount} 个</span>
+            <span class="metric-chip ${operator ? "is-good" : "is-warn"}">当前 ${escapeHtml(operator?.username || "未选择")}</span>
+          </div>
         </div>
-        <div class="sidebar-scroll">
-          ${(filteredAccounts().map(renderAccountRow).join("")) || `<div class="empty-copy">没有匹配到账号。</div>`}
+        <div class="record-list">
+          ${state.accounts.length ? state.accounts.map((item) => renderAccountRow(item)).join("") : `
+            <div class="empty-state">
+              <div>当前没有账号数据。</div>
+              <div class="empty-hint">可以先新建账号，再设为当前操作账号。</div>
+            </div>
+          `}
         </div>
       </aside>
 
-      <section class="surface">
-        <div class="surface-head">
-          <div>
-            <div class="eyebrow">Account Sync</div>
-            <h3>${escapeHtml(state.accountDraft?.username || "新建账号")}</h3>
-            <p>保存时会同时写入登录服务与协同服务，确保软件账号、联系人与后台配置同步。</p>
-          </div>
-          <div class="inline-actions">
-            <button class="ghost-btn" data-action="new-account">
-              <span class="material-symbols-outlined">restart_alt</span>
-              <span>清空表单</span>
-            </button>
-            <button class="primary-btn" data-action="save-account">
-              <span class="material-symbols-outlined">cloud_sync</span>
-              <span>同步账号</span>
-            </button>
+      <article class="editor-shell">
+        <div class="editor-topbar">
+          <div class="editor-head-row">
+            <div>
+              <div class="section-kicker">账号编辑</div>
+              <h3 class="editor-title">${escapeHtml(draft.full_name || "新建账号")}</h3>
+              <p class="editor-subtitle">保存后会同时更新系统登录账号和协同账号信息，软件端登录同一账号时会读取同一份资料。</p>
+            </div>
+            <div class="editor-actions">
+              ${draft.username ? `<button class="action-btn-secondary" data-action="set-operator" data-username="${escapeAttr(draft.username)}">设为当前操作账号</button>` : ""}
+              <button class="action-btn" data-action="save-account">保存账号</button>
+            </div>
           </div>
         </div>
-        ${renderAccountForm()}
-      </section>
-    </section>
-  `;
-}
 
-function renderAccountForm() {
-  const draft = state.accountDraft;
-  if (!draft) {
-    return `<div class="empty-copy">请选择一个账号，或点击“新建账号”。</div>`;
-  }
-  return `
-    <div class="stack">
-      <div class="form-grid">
-        <label class="field"><span>内部 ID</span><input id="account-id" value="${escapeAttr(draft.id || "")}" placeholder="首次创建可留空" /></label>
-        <label class="field"><span>用户名</span><input id="account-username" value="${escapeAttr(draft.username || "")}" placeholder="将用于软件登录" /></label>
-        <label class="field"><span>姓名</span><input id="account-full-name" value="${escapeAttr(draft.full_name || "")}" /></label>
-        <label class="field"><span>角色</span>
-          <select id="account-role-code">
-            ${ROLE_OPTIONS.map((role) => `<option value="${role}" ${draft.role_code === role ? "selected" : ""}>${role}</option>`).join("")}
-          </select>
-        </label>
-        <label class="field"><span>手机号</span><input id="account-phone" value="${escapeAttr(draft.phone || "")}" /></label>
-        <label class="field"><span>邮箱</span><input id="account-email" value="${escapeAttr(draft.email || "")}" /></label>
-        <label class="field"><span>所属病区 / 科室</span><input id="account-department" value="${escapeAttr(draft.department || "")}" /></label>
-        <label class="field"><span>岗位职称</span><input id="account-title" value="${escapeAttr(draft.title || "")}" /></label>
-        <label class="field"><span>账号状态</span>
-          <select id="account-status">
-            ${["active", "inactive", "locked"].map((item) => `<option value="${item}" ${draft.status === item ? "selected" : ""}>${item}</option>`).join("")}
-          </select>
-        </label>
-        <label class="field"><span>重置密码</span><input id="account-password" type="text" value="" placeholder="${draft.username ? "留空则不修改密码" : "首次创建建议填写"}" /></label>
-      </div>
-      <div class="hint-box">
-        这里改的是软件账号真实配置。账号保存后，软件登录、后台联系人列表和协同搜索会读到同一份同步结果。
-      </div>
-    </div>
+        <div class="editor-form">
+          <section class="form-section">
+            <div class="form-section-header">
+              <div>
+                <h4>账号基本信息</h4>
+                <div class="section-help">先保证账号识别、角色和组织归属是清晰稳定的。</div>
+              </div>
+            </div>
+            <div class="form-grid">
+              ${renderField("内部 ID", "account-id", draft.id, { readonly: true })}
+              ${renderField("账号名", "account-username", draft.username)}
+              ${renderField("显示姓名", "account-full-name", draft.full_name)}
+              ${renderSelectField("角色", "account-role", draft.role_code, ROLE_OPTIONS)}
+              ${renderField("所属科室", "account-department", draft.department)}
+              ${renderField("岗位/职称", "account-title", draft.title)}
+              ${renderSelectField("账号状态", "account-status", draft.status, ACCOUNT_STATUS_OPTIONS)}
+              ${renderField("重置密码", "account-password", draft.password, { placeholder: "留空则不修改密码" })}
+            </div>
+          </section>
+
+          <section class="form-section">
+            <div class="form-section-header">
+              <div>
+                <h4>联系方式</h4>
+                <div class="section-help">联系方式独立一组，避免和权限字段混在一起。</div>
+              </div>
+            </div>
+            <div class="form-grid">
+              ${renderField("手机号", "account-phone", draft.phone)}
+              ${renderField("邮箱", "account-email", draft.email)}
+            </div>
+          </section>
+        </div>
+      </article>
+    </section>
   `;
 }
 
 function renderMonitorView() {
+  const sessions = state.sessions;
+  const beds = state.liveBeds;
+
   return `
     <section class="monitor-grid">
-      <article class="surface">
-        <div class="surface-head">
+      <article class="panel panel-span-4">
+        <div class="panel-header">
           <div>
-            <div class="eyebrow">Connectivity</div>
-            <h3>系统联通状态</h3>
-            <p>确认后台、API 网关、设备链路与 AI 运行时是否处于可操作状态。</p>
+            <h3>网关健康</h3>
+            <p>用于确认后台入口和微服务是否在线。</p>
           </div>
         </div>
-        <div class="kpi-strip">
-          ${renderSimpleMetric("网关", state.gatewayHealth?.status === "ok" ? "在线" : "离线", state.gatewayHealth ? "ok" : "err")}
-          ${renderSimpleMetric("AI 引擎", state.runtime?.active_engine || "-", state.runtime ? "ok" : "warn")}
-          ${renderSimpleMetric("设备会话", String(state.sessions.length || 0), state.sessions.length ? "ok" : "warn")}
-          ${renderSimpleMetric("设备绑定", state.binding?.owner_username || "未绑定", state.binding ? "ok" : "warn")}
+        <div class="fact-list">
+          ${renderFactRow("API 网关", gatewayStatusInfo().label)}
+          ${renderFactRow("设备绑定", monitorStateLabel(state.binding))}
+          ${renderFactRow("会话数量", String(sessions.length))}
+          ${renderFactRow("床位快照", `${beds.length} 条`)}
         </div>
       </article>
 
-      <article class="surface">
-        <div class="surface-head">
+      <article class="panel panel-span-4">
+        <div class="panel-header">
           <div>
-            <div class="eyebrow">Sync Log</div>
-            <h3>最近操作</h3>
-            <p>记录后台保存动作，便于确认刚刚的数据写入是否生效。</p>
+            <h3>设备绑定状态</h3>
+            <p>如果设备网关未联通，这里会明确提示，不再用复杂卡片绕弯。</p>
           </div>
         </div>
-        <div class="stack">
-          ${state.monitorLogs.slice(0, 12).map(renderMonitorLog).join("") || `<div class="empty-copy">还没有后台操作日志。</div>`}
-        </div>
+        ${renderMonitorBinding()}
       </article>
 
-      <article class="surface">
-        <div class="surface-head">
+      <article class="panel panel-span-4">
+        <div class="panel-header">
           <div>
-            <div class="eyebrow">Device Sessions</div>
-            <h3>在线设备会话</h3>
+            <h3>活跃会话</h3>
+            <p>用于查看设备接入链路当前是否有正在执行的会话。</p>
           </div>
         </div>
-        <div class="surface-scroll">
-          <table class="table">
-            <thead>
-              <tr><th>会话 ID</th><th>客户端</th><th>连接时间</th><th>最近活跃</th></tr>
-            </thead>
-            <tbody>
-              ${(state.sessions || []).map((item) => `
-                <tr>
-                  <td class="mono">${escapeHtml(shortId(item.connection_id || item.id || ""))}</td>
-                  <td>${escapeHtml(item.client || item.peer || item.remote_addr || "-")}</td>
-                  <td>${escapeHtml(fmtTime(item.connected_at || item.created_at))}</td>
-                  <td>${escapeHtml(fmtTime(item.last_seen_at || item.updated_at))}</td>
-                </tr>
-              `).join("") || `<tr><td colspan="4" class="muted">暂无在线设备</td></tr>`}
-            </tbody>
-          </table>
-        </div>
+        ${sessions.length ? `
+          <div class="status-list">
+            ${sessions.map((item) => `
+              <div class="status-row">
+                <span class="status-label">${escapeHtml(item.session_id || item.id || "会话")}</span>
+                <span class="status-value">${escapeHtml(item.status || "unknown")}</span>
+              </div>
+            `).join("")}
+          </div>
+        ` : renderInlineEmpty("当前没有活跃设备会话。")}
       </article>
 
-      <article class="surface">
-        <div class="surface-head">
+      <article class="panel panel-span-12">
+        <div class="panel-header">
           <div>
-            <div class="eyebrow">Ward Stream</div>
-            <h3>实时床位流</h3>
+            <h3>床位状态快照</h3>
+            <p>保持成规则表格，适合排班和后台巡视时快速扫读。</p>
           </div>
         </div>
-        <div class="bed-strip">
-          ${(state.liveBeds || []).slice(0, 16).map(renderBedTile).join("") || `<div class="empty-copy">等待病区流数据。</div>`}
-        </div>
+        ${beds.length ? `
+          <div class="data-table bed-table">
+            <div class="table-head">
+              <div>床位</div>
+              <div>患者</div>
+              <div>状态</div>
+              <div>待办</div>
+            </div>
+            ${beds.map((bed) => `
+              <div class="table-row">
+                <div class="mini-stack">
+                  <strong>${escapeHtml(bed.bed_no || "—")}</strong>
+                  <span class="tiny-text">${escapeHtml(bed.room_no || "—")} 房</span>
+                </div>
+                <div>${escapeHtml(bed.patient_name || "空床")}</div>
+                <div><span class="row-flag ${bed.status === "occupied" ? "is-good" : "is-neutral"}">${escapeHtml(bedStatusLabel(bed.status))}</span></div>
+                <div>${escapeHtml((bed.pending_tasks || []).slice(0, 2).join("；") || "无")}</div>
+              </div>
+            `).join("")}
+          </div>
+        ` : renderInlineEmpty("当前病区暂无床位快照。")}
       </article>
     </section>
   `;
 }
 
-function renderKpiItem(item) {
-  return `
-    <div class="kpi-item">
-      <div class="label">${escapeHtml(item.label || item.key || "-")}</div>
-      <div class="value">${escapeHtml(String(item.value ?? 0))}</div>
-      <div class="helper-text">${escapeHtml(item.hint || "")}</div>
-    </div>
-  `;
-}
-
-function renderHeroStat(item) {
-  return `
-    <div class="hero-stat">
-      <div class="label">${escapeHtml(item.label || item.key || "-")}</div>
-      <div class="value">${escapeHtml(String(item.value ?? 0))}</div>
-      <div class="helper-text">${escapeHtml(item.hint || "")}</div>
-    </div>
-  `;
-}
-
-function renderDistributionBlock(title, items) {
-  const safeItems = Array.isArray(items) ? items : [];
-  return `
-    <div class="surface" style="padding:18px;">
-      <div class="surface-head" style="margin-bottom:12px;">
-        <div><h3 style="font-size:18px;">${escapeHtml(title)}</h3></div>
-      </div>
-      <div class="distribution-list">
-        ${renderDistributionRows(safeItems)}
-      </div>
-    </div>
-  `;
-}
-
-function renderDistributionRows(items) {
-  if (!items.length) return `<div class="empty-copy">暂无分布数据。</div>`;
-  const max = Math.max(...items.map((item) => Number(item.value || 0)), 1);
-  return items
-    .map((item) => `
-      <div class="distribution-row">
-        <strong>${escapeHtml(item.label || "-")}</strong>
-        <div class="distribution-track">
-          <span class="distribution-fill" style="width:${Math.max(8, Math.round((Number(item.value || 0) / max) * 100))}%"></span>
-        </div>
-        <span>${escapeHtml(String(item.value ?? 0))}</span>
-      </div>
-    `)
-    .join("");
-}
-
-function renderBedTile(item) {
-  const status = item.current_status || item.status || (item.current_patient_id ? "occupied" : "empty");
-  const patientName = item.full_name || item.patient_name || "空床";
-  const tags = Array.isArray(item.risk_tags) ? item.risk_tags.slice(0, 2) : [];
-  const action = item.patient_id || item.current_patient_id ? "select-case" : "";
-  const id = item.patient_id || item.current_patient_id || "";
-  return `
-    <button class="bed-tile" data-action="${action}" data-id="${escapeAttr(id)}">
-      <strong>${escapeHtml(String(item.bed_no || "-"))} 床</strong>
-      <div>${escapeHtml(patientName)}</div>
-      <div class="segment-row" style="margin-top:8px;">
-        <span class="soft-pill ${status === "admitted" || status === "occupied" ? "ok" : "warn"}">${escapeHtml(status)}</span>
-        ${tags.map((tag) => `<span class="segment-tag">${escapeHtml(tag)}</span>`).join("")}
-      </div>
-    </button>
-  `;
-}
-
-function renderHotspot(item) {
-  return `
-    <div class="hotspot-row">
-      <div class="hotspot-head">
-        <div>
-          <strong>${escapeHtml(item.bed_no || "-")} 床 · ${escapeHtml(item.patient_name || "未命名患者")}</strong>
-          <div class="helper-text">${escapeHtml(item.latest_observation || "暂无最新观察")}</div>
-        </div>
-        <span class="status-pill ${item.score >= 3 ? "warn" : "ok"}">压力分 ${escapeHtml(String(item.score ?? 0))}</span>
-      </div>
-      <div class="segment-row">
-        ${(item.reasons || []).map((reason) => `<span class="segment-tag">${escapeHtml(reason)}</span>`).join("") || `<span class="segment-tag">暂无热点原因</span>`}
-      </div>
-    </div>
-  `;
-}
-
 function renderCaseRow(item) {
-  const activeId = state.caseDraft?.patient_id || state.caseBundle?.patient?.id || "";
-  const isActive = item.patient_id === activeId;
+  const active = item.patient_id === state.selectedCaseId ? "active" : "";
+  const taskCount = (item.pending_tasks || []).length;
+  const riskCount = (item.risk_tags || []).length;
+  const tone = toneClassByObservation(item.latest_observation);
+  const time = formatShortTime(item.updated_at);
+
   return `
-    <button class="list-row ${isActive ? "active" : ""}" data-action="select-case" data-id="${escapeAttr(item.patient_id)}">
-      <div class="list-row-head">
-        <div>
-          <strong>${escapeHtml(item.full_name || "未命名患者")}</strong>
-          <div class="meta">${escapeHtml(item.department_name || "-")} · ${escapeHtml(item.bed_no || "-")} 床</div>
+    <button class="record-row ${active}" data-action="select-case" data-id="${escapeAttr(item.patient_id)}">
+      <div class="record-row-top">
+        <div class="record-primary">
+          <div class="record-title-line">
+            <span class="tag is-neutral">${escapeHtml(item.bed_no || "未分床")}${item.bed_no ? " 床" : ""}</span>
+            <strong class="record-title">${escapeHtml(item.full_name || "未命名患者")}</strong>
+            <span class="tiny-text">${escapeHtml(`${item.gender || "未知"} · ${item.age ?? "—"} 岁 · ${item.mrn || "未填 MRN"}`)}</span>
+          </div>
+          <div class="record-meta">${escapeHtml(`${item.room_no || "—"} 房 · ${caseStatusLabel(item.current_status)} · ${item.department_name || "未归属病区"}`)}</div>
+          <div class="record-subline">${escapeHtml(item.latest_observation || "暂无最新观察")}</div>
+          <div class="record-tags">
+            <span class="tag ${taskCount ? "is-warn" : "is-good"}">待办 ${taskCount} 项</span>
+            <span class="tag ${riskCount ? "is-bad" : "is-good"}">风险 ${riskCount} 项</span>
+            <span class="tag ${tone}">${escapeHtml(time)}</span>
+          </div>
         </div>
-        <span class="soft-pill ${item.risk_tags?.length ? "warn" : "ok"}">${item.risk_tags?.length || 0} 风险</span>
-      </div>
-      <div class="helper-text">${escapeHtml(item.latest_observation || item.mrn || "-")}</div>
-      <div class="segment-row">
-        ${(item.risk_tags || []).slice(0, 2).map((tag) => `<span class="segment-tag">${escapeHtml(tag)}</span>`).join("")}
-        ${(item.pending_tasks || []).slice(0, 1).map((task) => `<span class="segment-tag">${escapeHtml(task)}</span>`).join("")}
       </div>
     </button>
   `;
 }
 
 function renderAccountRow(item) {
-  const activeUsername = state.accountDraft?.username || "";
-  const isActive = item.username === activeUsername || item.account === activeUsername;
+  const active = item.username === state.selectedAccountUsername ? "active" : "";
+  const isOperator = item.username === state.cfg.operatorUsername;
+
   return `
-    <button class="list-row ${isActive ? "active" : ""}" data-action="select-account" data-username="${escapeAttr(item.username || item.account || "")}">
-      <div class="list-row-head">
-        <div>
-          <strong>${escapeHtml(item.full_name || item.username || item.account || "-")}</strong>
-          <div class="meta">@${escapeHtml(item.username || item.account || "-")} · ${escapeHtml(item.role_code || "-")}</div>
+    <button class="record-row ${active}" data-action="select-account" data-username="${escapeAttr(item.username || "")}">
+      <div class="record-row-top">
+        <div class="record-primary">
+          <div class="record-title-line">
+            <strong class="record-title">${escapeHtml(item.full_name || item.username || "未命名账号")}</strong>
+            ${isOperator ? `<span class="tag is-neutral">当前操作账号</span>` : ""}
+          </div>
+          <div class="record-meta">${escapeHtml(`${item.username || "—"} · ${roleLabel(item.role_code)} · ${item.department || "未填写科室"}`)}</div>
+          <div class="record-subline">${escapeHtml(item.title || "未填写岗位")}</div>
+          <div class="record-tags">
+            <span class="tag ${accountStatusTone(item.status)}">${escapeHtml(accountStatusLabel(item.status))}</span>
+            <span class="tag is-neutral">${escapeHtml(item.email || item.phone || "未填写联系方式")}</span>
+          </div>
         </div>
-        <span class="soft-pill ${item.status === "active" ? "ok" : "warn"}">${escapeHtml(item.status || "active")}</span>
       </div>
-      <div class="helper-text">${escapeHtml(item.department || "未分配病区")} · ${escapeHtml(item.title || "未设置职称")}</div>
     </button>
   `;
 }
 
-function renderActivityCard(title, rows, labelPicker) {
-  const safeRows = Array.isArray(rows) ? rows.slice(0, 3) : [];
+function renderDistributionList(items) {
+  if (!items.length) {
+    return renderInlineEmpty("当前病区暂无统计条目。");
+  }
+
+  const max = Math.max(...items.map((item) => Number(item.value || 0)), 1);
   return `
-    <article class="activity-card">
-      <div class="eyebrow">${escapeHtml(title)}</div>
-      ${safeRows.map((item) => `
-        <div style="margin-top:12px;">
-          <div class="headline">${escapeHtml(labelPicker(item))}</div>
-          <div class="activity-time">${escapeHtml(fmtTime(item.updated_at || item.created_at))}</div>
+    <div class="distribution-list">
+      ${items.map((item) => `
+        <div class="distribution-item">
+          <div class="distribution-meta">
+            <span class="distribution-label">${escapeHtml(item.label || "未命名")}</span>
+            <span class="distribution-value">${escapeHtml(String(item.value || 0))}</span>
+          </div>
+          <div class="distribution-bar">
+            <span style="width:${Math.max(8, (Number(item.value || 0) / max) * 100)}%"></span>
+          </div>
         </div>
-      `).join("") || `<p>暂无关联数据。</p>`}
-    </article>
-  `;
-}
-
-function renderSimpleMetric(label, value, tone) {
-  return `
-    <div class="kpi-item">
-      <div class="label">${escapeHtml(label)}</div>
-      <div class="value">${escapeHtml(value)}</div>
-      <span class="soft-pill ${tone}">${escapeHtml(tone)}</span>
+      `).join("")}
     </div>
   `;
 }
 
-function renderMonitorLog(item) {
+function renderMonitorBinding() {
+  if (!state.binding) {
+    return renderInlineEmpty("尚未获取设备绑定状态。");
+  }
+  if (state.binding.detail) {
+    return renderInlineEmpty(`设备网关当前不可用：${state.binding.detail}`);
+  }
+
+  const entries = Object.entries(state.binding);
+  return entries.length ? `
+    <div class="status-list">
+      ${entries.map(([key, value]) => `
+        <div class="status-row">
+          <span class="status-label">${escapeHtml(key)}</span>
+          <span class="status-value">${escapeHtml(stringifyValue(value))}</span>
+        </div>
+      `).join("")}
+    </div>
+  ` : renderInlineEmpty("当前没有设备绑定数据。");
+}
+
+function renderField(label, id, value, options = {}) {
+  const type = options.type || "text";
+  const readonly = options.readonly ? "readonly" : "";
+  const fieldClass = options.readonly ? "field field-readonly" : "field";
+  const full = options.full ? " field-full" : "";
   return `
-    <div class="activity-row">
-      <strong>${escapeHtml(item.title || "-")}</strong>
-      <div>${escapeHtml(item.detail || "")}</div>
-      <div class="activity-time">${escapeHtml(fmtTime(item.at))}</div>
+    <label class="${fieldClass}${full}">
+      <span>${escapeHtml(label)}</span>
+      <input id="${escapeAttr(id)}" type="${escapeAttr(type)}" value="${escapeAttr(value ?? "")}" placeholder="${escapeAttr(options.placeholder || "")}" ${readonly} />
+    </label>
+  `;
+}
+
+function renderTextareaField(label, id, value, options = {}) {
+  const full = options.full ? " field-full" : "";
+  return `
+    <label class="field${full}">
+      <span>${escapeHtml(label)}</span>
+      <textarea id="${escapeAttr(id)}" class="textarea-compact" placeholder="${escapeAttr(options.placeholder || "")}">${escapeHtml(value ?? "")}</textarea>
+    </label>
+  `;
+}
+
+function renderSelectField(label, id, value, options) {
+  return `
+    <label class="field">
+      <span>${escapeHtml(label)}</span>
+      <select id="${escapeAttr(id)}">
+        ${options.map((item) => `
+          <option value="${escapeAttr(item.value)}" ${item.value === value ? "selected" : ""}>${escapeHtml(item.label)}</option>
+        `).join("")}
+      </select>
+    </label>
+  `;
+}
+
+function renderFactRow(label, value) {
+  return `
+    <div class="fact-row">
+      <span class="fact-label">${escapeHtml(label)}</span>
+      <span class="fact-value">${escapeHtml(value || "—")}</span>
     </div>
   `;
 }
 
-function renderStatusRibbon() {
-  const pills = [];
-  pills.push(`<span class="status-pill ${state.gatewayHealth?.status === "ok" ? "ok" : "err"}">API 网关 ${escapeHtml(state.gatewayHealth?.status || "offline")}</span>`);
-  pills.push(`<span class="status-pill ${state.runtime ? "ok" : "warn"}">AI ${escapeHtml(state.runtime?.active_engine || "-")}</span>`);
-  pills.push(`<span class="status-pill ${state.sessions.length ? "ok" : "warn"}">设备会话 ${escapeHtml(String(state.sessions.length || 0))}</span>`);
-  pills.push(`<span class="status-pill ${state.caseDraft?.patient_id ? "ok" : "warn"}">当前病例 ${escapeHtml(state.caseDraft?.full_name || "未选择")}</span>`);
-  pills.push(`<span class="status-pill ${state.accountDraft?.username ? "ok" : "warn"}">当前账号 ${escapeHtml(state.accountDraft?.username || "未选择")}</span>`);
-  if (state.lastSyncAt) {
-    pills.push(`<span class="status-pill ok">最近同步 ${escapeHtml(fmtTime(state.lastSyncAt))}</span>`);
-  }
-  els["status-ribbon"].innerHTML = pills.join("");
-}
-
-function filteredCases() {
-  return state.cases.filter((item) => {
-    if (!state.search) return true;
-    const joined = [
-      item.full_name,
-      item.mrn,
-      item.inpatient_no,
-      item.bed_no,
-      item.department_name,
-      ...(item.risk_tags || []),
-      ...(item.pending_tasks || []),
-    ]
-      .filter(Boolean)
-      .join(" ")
-      .toLowerCase();
-    return joined.includes(state.search);
-  });
-}
-
-function filteredAccounts() {
-  return state.accounts.filter((item) => {
-    if (!state.search) return true;
-    const joined = [
-      item.username,
-      item.account,
-      item.full_name,
-      item.role_code,
-      item.department,
-      item.title,
-    ]
-      .filter(Boolean)
-      .join(" ")
-      .toLowerCase();
-    return joined.includes(state.search);
-  });
-}
-
-function currentDepartment() {
-  return state.departments.find((item) => item.id === state.cfg.departmentId || item.code === state.cfg.departmentId) || null;
-}
-
-function syncConfigInputs() {
-  els["cfg-api-base"].value = state.cfg.apiBase;
-}
-
-function syncFilterInputs() {
-  els["case-status-filter"].value = state.cfg.caseStatus || "";
-  els["account-status-filter"].value = state.cfg.accountStatus || "";
-}
-
-function syncDepartmentSelect() {
-  els["department-select"].innerHTML = state.departments
-    .map((item) => `<option value="${escapeAttr(item.id || item.code || "")}">${escapeHtml(item.name || item.code || "-")}</option>`)
-    .join("");
-  if (state.cfg.departmentId) {
-    els["department-select"].value = state.cfg.departmentId;
-  }
-}
-
-function updateDepartmentLabel() {
-  const department = currentDepartment();
-  els["current-department-name"].textContent = department?.name || "未选择病区";
-  const meta = state.analytics
-    ? `生成于 ${fmtTime(state.analytics.generated_at)}`
-    : department?.location || "等待分析数据";
-  els["current-department-meta"].textContent = meta;
-}
-
-function updateOwnerCard() {
-  const draft = state.accountDraft;
-  const name = draft?.full_name || state.caseDraft?.full_name || "未选择";
-  const identity = draft?.username || draft?.id || "-";
-  els["owner-avatar"].textContent = String(name || "?").slice(0, 1).toUpperCase();
-  els["owner-name"].textContent = name;
-  els["owner-id"].textContent = identity;
-}
-
-function updateGatewayChip() {
-  const chip = els["gateway-status"];
-  chip.className = "status-pill";
-  if (state.gatewayHealth?.status === "ok") {
-    chip.textContent = "网关在线";
-    chip.classList.add("ok");
-  } else {
-    chip.textContent = "网关离线";
-    chip.classList.add("err");
-  }
-}
-
-function addMonitorLog(title, detail) {
-  state.monitorLogs.unshift({
-    at: new Date().toISOString(),
-    title,
-    detail,
-  });
-  state.monitorLogs = state.monitorLogs.slice(0, 30);
-}
-
-function closeConfigDrawer() {
-  els["config-drawer"].classList.add("hidden");
-}
-
-function fieldValue(id) {
-  return String(document.getElementById(id)?.value || "").trim();
-}
-
-function parseLines(text) {
-  return String(text || "")
-    .split(/\r?\n/)
-    .map((item) => item.trim())
-    .filter(Boolean);
+function renderInlineEmpty(text) {
+  return `<div class="empty-state"><div>${escapeHtml(text)}</div></div>`;
 }
 
 async function api(path, options = {}) {
-  const base = String(state.cfg.apiBase || DEFAULT_CFG.apiBase).replace(/\/+$/, "");
-  const headers = { ...(options.headers || {}) };
-  const init = { method: options.method || "GET", headers };
+  const url = new URL(path, ensureApiBase());
+  const params = options.params || {};
+  Object.entries(params).forEach(([key, value]) => {
+    if (value === undefined || value === null || value === "") return;
+    url.searchParams.set(key, String(value));
+  });
+
+  const requestInit = {
+    method: options.method || "GET",
+    headers: {},
+    cache: "no-store",
+  };
+
   if (options.body !== undefined) {
-    headers["Content-Type"] = "application/json";
-    init.body = JSON.stringify(options.body);
+    requestInit.headers["Content-Type"] = "application/json";
+    requestInit.body = JSON.stringify(options.body);
   }
-  const response = await fetch(`${base}${path}`, init);
-  const contentType = response.headers.get("content-type") || "";
-  const payload = contentType.includes("application/json") ? await response.json().catch(() => ({})) : await response.text();
+
+  const response = await fetch(url.toString(), requestInit);
+  const raw = await response.text();
+  const data = raw ? tryParseJson(raw) : null;
+
   if (!response.ok) {
-    const detail = typeof payload === "object" && payload ? payload.detail || JSON.stringify(payload) : payload;
-    throw new Error(detail || `HTTP ${response.status}`);
+    const detail = data?.detail || data?.message || raw || `${response.status} ${response.statusText}`;
+    throw new Error(typeof detail === "string" ? detail : JSON.stringify(detail));
   }
-  return payload;
+
+  return data;
 }
 
-function connectWardSocket() {
-  if (state.wardSocket) {
-    state.wardSocket.close();
-    state.wardSocket = null;
-  }
-  const departmentId = state.cfg.departmentId;
-  if (!departmentId) return;
-  try {
-    const base = new URL(state.cfg.apiBase);
-    const protocol = base.protocol === "https:" ? "wss:" : "ws:";
-    const url = `${protocol}//${base.host}/ws/ward-beds/${encodeURIComponent(departmentId)}`;
-    const socket = new WebSocket(url);
-    socket.onmessage = (event) => {
-      try {
-        const payload = JSON.parse(event.data);
-        if (payload.type === "ward_beds_update" && Array.isArray(payload.data)) {
-          state.liveBeds = payload.data;
-          queueSoftRefresh();
-        }
-      } catch (_error) {
-        // ignore malformed messages
-      }
-    };
-    socket.onopen = () => addMonitorLog("病区流连接", `已连接 ${departmentId}`);
-    socket.onerror = () => addMonitorLog("病区流异常", "实时连接出现异常");
-    state.wardSocket = socket;
-  } catch (_error) {
-    // ignore ws failures on local static preview
-  }
-}
-
-function queueSoftRefresh() {
-  if (state.softRefreshTimer) {
-    window.clearTimeout(state.softRefreshTimer);
-  }
-  state.softRefreshTimer = window.setTimeout(() => {
-    refreshAnalytics().then(render).catch(handleError);
-    refreshCases({ keepSelection: true }).then(render).catch(handleError);
-  }, 600);
+function ensureApiBase() {
+  return state.cfg.apiBase || DEFAULT_CFG.apiBase;
 }
 
 function loadConfig() {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (!raw) return { ...DEFAULT_CFG };
-    const parsed = JSON.parse(raw);
-    return {
-      apiBase: parsed.apiBase || DEFAULT_CFG.apiBase,
-      departmentId: parsed.departmentId || DEFAULT_CFG.departmentId,
-      caseStatus: parsed.caseStatus || DEFAULT_CFG.caseStatus,
-      accountStatus: parsed.accountStatus || DEFAULT_CFG.accountStatus,
-    };
-  } catch (_error) {
+    return { ...DEFAULT_CFG, ...JSON.parse(raw) };
+  } catch {
     return { ...DEFAULT_CFG };
   }
 }
@@ -1295,48 +1395,245 @@ function saveConfig(cfg) {
   localStorage.setItem(STORAGE_KEY, JSON.stringify(cfg));
 }
 
-function handleError(error) {
-  console.error(error);
-  toast(errorText(error), "err");
+function closeConfigDrawer() {
+  els["config-drawer"].classList.add("hidden");
+}
+
+function currentDepartment() {
+  return state.departments.find((item) => item.id === state.cfg.departmentId) || null;
+}
+
+function getCurrentOperator() {
+  return state.accounts.find((item) => item.username === state.cfg.operatorUsername) || null;
+}
+
+function gatewayStatusInfo() {
+  if (state.gatewayHealth?.status === "ok") {
+    return {
+      label: "网关在线",
+      short: "在线",
+      detail: "后台 API 网关可正常访问",
+      tone: "is-good",
+    };
+  }
+  if (state.gatewayHealth?.detail) {
+    return {
+      label: "网关异常",
+      short: "异常",
+      detail: String(state.gatewayHealth.detail),
+      tone: "is-bad",
+    };
+  }
+  return {
+    label: "网关待检测",
+    short: "待检测",
+    detail: "尚未完成网关状态检查",
+    tone: "is-neutral",
+  };
+}
+
+function pickPreferredDepartment(departments) {
+  if (!departments.length) return null;
+  return (
+    departments.find((item) => item.id === "11111111-1111-1111-1111-111111111001") ||
+    departments.find((item) => String(item.name || "").includes("护理单元")) ||
+    departments.find((item) => String(item.code || "").includes("CARD")) ||
+    departments[0]
+  );
+}
+
+function compareCaseRows(a, b) {
+  const bedA = Number.parseInt(String(a.bed_no || "9999"), 10);
+  const bedB = Number.parseInt(String(b.bed_no || "9999"), 10);
+  if (Number.isFinite(bedA) && Number.isFinite(bedB) && bedA !== bedB) {
+    return bedA - bedB;
+  }
+  return String(a.full_name || "").localeCompare(String(b.full_name || ""), "zh-CN");
+}
+
+function compareAccounts(a, b) {
+  if (a.status !== b.status) {
+    return a.status === "active" ? -1 : 1;
+  }
+  return String(a.full_name || a.username || "").localeCompare(String(b.full_name || b.username || ""), "zh-CN");
+}
+
+function dedupeCases(rows) {
+  const map = new Map();
+  rows.forEach((item) => {
+    const key = String(item.patient_id || "");
+    if (!key) return;
+    const current = map.get(key);
+    if (!current) {
+      map.set(key, item);
+      return;
+    }
+    const currentTime = new Date(current.updated_at || 0).getTime();
+    const nextTime = new Date(item.updated_at || 0).getTime();
+    if (nextTime >= currentTime) {
+      map.set(key, item);
+    }
+  });
+  return Array.from(map.values());
+}
+
+function normalizeArray(data) {
+  if (Array.isArray(data)) return data;
+  if (Array.isArray(data?.value)) return data.value;
+  return [];
+}
+
+function listToText(items) {
+  return normalizeArray(items).map((item) => String(item || "").trim()).filter(Boolean).join("\n");
+}
+
+function parseTextList(text) {
+  return String(text || "")
+    .split(/\r?\n|,|，|；|;/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function monitorStateLabel(binding) {
+  if (!binding) return "未检测";
+  if (binding.detail) return "不可用";
+  return "在线";
+}
+
+function operatorLabel(operator) {
+  if (!operator) return "";
+  return `${operator.full_name || operator.username}${operator.username ? `（${operator.username}）` : ""}`;
+}
+
+function roleLabel(roleCode) {
+  return ROLE_OPTIONS.find((item) => item.value === roleCode)?.label || roleCode || "未设定角色";
+}
+
+function caseStatusLabel(status) {
+  return CASE_STATUS_OPTIONS.find((item) => item.value === status)?.label || status || "未设定";
+}
+
+function accountStatusLabel(status) {
+  return ACCOUNT_STATUS_OPTIONS.find((item) => item.value === status)?.label || status || "未设定";
+}
+
+function accountStatusTone(status) {
+  if (status === "active") return "is-good";
+  if (status === "inactive") return "is-neutral";
+  return "is-bad";
+}
+
+function bedStatusLabel(status) {
+  if (status === "occupied") return "已占用";
+  if (status === "free") return "空闲";
+  return status || "未知";
+}
+
+function observationLevelLabel(text) {
+  const lower = String(text || "").toLowerCase();
+  if (lower.includes("critical")) return "危急观察";
+  if (lower.includes("high")) return "偏高观察";
+  if (lower.includes("low")) return "偏低观察";
+  return "常规观察";
+}
+
+function toneClassByObservation(text) {
+  const lower = String(text || "").toLowerCase();
+  if (lower.includes("critical")) return "is-bad";
+  if (lower.includes("high")) return "is-warn";
+  if (lower.includes("low")) return "is-neutral";
+  return "is-good";
+}
+
+function toneClassByScore(score) {
+  const value = Number(score || 0);
+  if (value >= 3) return "is-bad";
+  if (value >= 1) return "is-warn";
+  return "is-good";
+}
+
+function formatShortTime(value) {
+  if (!value) return "未同步";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "未同步";
+  return `${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")} ${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
+}
+
+function formatDateTime(value) {
+  if (!value) return "—";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return String(value);
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")} ${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
+}
+
+function emptyToNull(value) {
+  const text = String(value || "").trim();
+  return text ? text : null;
+}
+
+function numberOrNull(value) {
+  const text = String(value || "").trim();
+  if (!text) return null;
+  const parsed = Number(text);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function valueOf(id) {
+  return String(document.getElementById(id)?.value || "");
+}
+
+function stringifyValue(value) {
+  if (value === null || value === undefined || value === "") return "—";
+  if (typeof value === "object") return JSON.stringify(value);
+  return String(value);
+}
+
+function tryParseJson(raw) {
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return raw;
+  }
 }
 
 function errorText(error) {
   if (!error) return "未知错误";
   if (typeof error === "string") return error;
-  if (error instanceof Error) return error.message || "发生异常";
-  return String(error);
+  if (error instanceof Error) return error.message || error.name;
+  try {
+    return JSON.stringify(error);
+  } catch {
+    return "未知错误";
+  }
 }
 
-function fmtTime(value) {
-  if (!value) return "-";
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return "-";
-  return date.toLocaleString("zh-CN", { hour12: false });
+function handleError(error) {
+  console.error(error);
+  toast("操作失败", errorText(error), "err");
 }
 
-function shortId(value) {
-  const text = String(value || "");
-  if (text.length <= 12) return text || "-";
-  return `${text.slice(0, 6)}...${text.slice(-4)}`;
+function toast(title, copy, tone = "ok") {
+  const node = document.createElement("div");
+  node.className = `toast is-${tone}`;
+  node.innerHTML = `
+    <p class="toast-title">${escapeHtml(title)}</p>
+    <p class="toast-copy">${escapeHtml(copy)}</p>
+  `;
+  els["toast-stack"].appendChild(node);
+  setTimeout(() => {
+    node.remove();
+  }, 3600);
 }
 
 function escapeHtml(value) {
   return String(value ?? "")
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&#39;");
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#39;");
 }
 
 function escapeAttr(value) {
-  return escapeHtml(value).replace(/`/g, "&#96;");
-}
-
-function toast(message, tone = "ok") {
-  const node = document.createElement("div");
-  node.className = `toast ${tone}`;
-  node.textContent = message;
-  els["toast-stack"].appendChild(node);
-  window.setTimeout(() => node.remove(), 3200);
+  return escapeHtml(value).replaceAll("\n", "&#10;");
 }

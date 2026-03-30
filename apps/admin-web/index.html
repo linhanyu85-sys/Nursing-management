@@ -3,123 +3,96 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>AI 护理后台管理系统</title>
-  <link rel="preconnect" href="https://fonts.googleapis.com" />
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet" />
-  <link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght@300;400;500;700" rel="stylesheet" />
+  <title>护理后台管理系统</title>
   <link rel="stylesheet" href="./assets/styles.css" />
 </head>
 <body>
-  <div class="shell">
-    <aside class="rail">
+  <div class="app-shell">
+    <aside class="side-nav">
       <div class="brand-block">
-        <div class="brand-mark">
-          <span class="material-symbols-outlined">clinical_notes</span>
-        </div>
-        <div>
-          <div class="eyebrow">AI Nursing Control</div>
-          <h1>护理后台总控台</h1>
-          <p>病例、账号、病区分析与联通状态统一管理</p>
+        <div class="brand-mark">护</div>
+        <div class="brand-copy">
+          <h1>护理后台管理</h1>
+          <p>病例、账号、病区运行和后台联通状态统一维护</p>
         </div>
       </div>
 
-      <nav class="rail-nav" id="nav-list">
-        <button class="rail-link active" data-view="overview">
-          <span class="material-symbols-outlined">dashboard</span>
-          <span>病区总览</span>
-        </button>
-        <button class="rail-link" data-view="cases">
-          <span class="material-symbols-outlined">patient_list</span>
-          <span>病例工作台</span>
-        </button>
-        <button class="rail-link" data-view="accounts">
-          <span class="material-symbols-outlined">manage_accounts</span>
-          <span>账号中心</span>
-        </button>
-        <button class="rail-link" data-view="monitor">
-          <span class="material-symbols-outlined">lan</span>
-          <span>联通监控</span>
-        </button>
+      <nav class="nav-list" id="nav-list">
+        <button class="nav-link active" data-view="overview">病区总览</button>
+        <button class="nav-link" data-view="cases">病例工作台</button>
+        <button class="nav-link" data-view="accounts">账号中心</button>
+        <button class="nav-link" data-view="monitor">联通监控</button>
       </nav>
 
-      <section class="rail-side">
-        <div class="mini-title">当前病区</div>
-        <div class="rail-highlight">
-          <div class="rail-value" id="current-department-name">载入中</div>
-          <div class="rail-meta" id="current-department-meta">等待同步管理数据</div>
-        </div>
+      <section class="nav-card">
+        <div class="nav-card-label">当前病区</div>
+        <div class="nav-card-title" id="current-department-name">加载中</div>
+        <div class="nav-card-meta" id="current-department-meta">等待同步病区数据</div>
       </section>
 
-      <section class="rail-side">
-        <div class="mini-title">当前账号</div>
-        <div class="identity-chip">
-          <div class="avatar" id="owner-avatar">A</div>
-          <div>
-            <div class="identity-name" id="owner-name">未选择</div>
-            <div class="identity-meta" id="owner-id">-</div>
-          </div>
-        </div>
+      <section class="nav-card">
+        <div class="nav-card-label">当前操作账号</div>
+        <div class="nav-card-title" id="operator-name">未选择</div>
+        <div class="nav-card-meta" id="operator-role">请在顶部切换当前操作账号</div>
       </section>
     </aside>
 
-    <main class="workspace">
-      <header class="workspace-head">
-        <div>
-          <div class="eyebrow">Clinical Operations</div>
+    <main class="main-shell">
+      <header class="topbar">
+        <div class="topbar-copy">
+          <div class="topbar-label">护理系统后台</div>
           <h2 id="view-title">病区总览</h2>
         </div>
-        <div class="head-actions">
-          <button id="gateway-status" class="status-pill">网关检测中</button>
-          <button id="refresh-btn" class="ghost-btn">
-            <span class="material-symbols-outlined">refresh</span>
-            <span>刷新</span>
-          </button>
-          <button id="open-config-btn" class="ghost-btn">
-            <span class="material-symbols-outlined">tune</span>
-            <span>连接配置</span>
-          </button>
+        <div class="topbar-actions">
+          <button id="gateway-status" class="status-chip is-neutral">网关待检测</button>
+          <button id="refresh-btn" class="action-btn-secondary">刷新</button>
+          <button id="open-config-btn" class="action-btn-secondary">连接配置</button>
         </div>
       </header>
 
-      <section class="workspace-toolbar">
-        <div class="toolbar-field wide">
-          <label for="department-select">病区</label>
+      <section class="filterbar">
+        <label class="field-group field-group-wide">
+          <span>病区</span>
           <select id="department-select"></select>
-        </div>
-        <div class="toolbar-field wide">
-          <label for="global-search">搜索</label>
-          <div class="search-box">
-            <span class="material-symbols-outlined">search</span>
-            <input id="global-search" type="text" placeholder="搜索床位、患者、工号、账号、病历号" />
-          </div>
-        </div>
-        <div class="toolbar-field narrow">
-          <label for="case-status-filter">病例状态</label>
+        </label>
+
+        <label class="field-group field-group-wide">
+          <span>检索</span>
+          <input id="global-search" type="text" placeholder="搜索床位、姓名、病历号、账号或任务" />
+        </label>
+
+        <label class="field-group">
+          <span>病例状态</span>
           <select id="case-status-filter">
             <option value="">全部</option>
             <option value="admitted">在院</option>
             <option value="transferred">转科</option>
             <option value="discharged">出院</option>
           </select>
-        </div>
-        <div class="toolbar-field narrow">
-          <label for="account-status-filter">账号状态</label>
+        </label>
+
+        <label class="field-group">
+          <span>账号状态</span>
           <select id="account-status-filter">
             <option value="">全部</option>
             <option value="active">启用</option>
             <option value="inactive">停用</option>
             <option value="locked">锁定</option>
           </select>
-        </div>
+        </label>
+
+        <label class="field-group field-group-wide">
+          <span>当前操作账号</span>
+          <select id="operator-select"></select>
+        </label>
       </section>
 
-      <section class="status-ribbon" id="status-ribbon"></section>
+      <section class="system-strip" id="system-strip"></section>
 
       <section id="view-root" class="view-root">
         <div class="loading-state">
           <div class="spinner"></div>
-          <p>正在加载后台管理工作面...</p>
+          <p>正在加载后台管理数据...</p>
         </div>
       </section>
     </main>
@@ -129,22 +102,22 @@
     <div class="drawer-panel">
       <div class="drawer-head">
         <div>
-          <div class="eyebrow">Gateway Settings</div>
-          <h3>连接配置</h3>
+          <div class="drawer-label">连接配置</div>
+          <h3>API 网关地址</h3>
         </div>
-        <button id="close-config-btn" class="icon-btn">
-          <span class="material-symbols-outlined">close</span>
-        </button>
+        <button id="close-config-btn" class="icon-btn" type="button">关闭</button>
       </div>
+
       <div class="drawer-body">
-        <label class="field">
-          <span>API 网关地址</span>
+        <label class="field-group">
+          <span>API 地址</span>
           <input id="cfg-api-base" type="text" placeholder="http://127.0.0.1:18000" />
         </label>
-        <p class="field-tip">如果管理端挂在 `api-gateway` 里，保持默认即可。</p>
+        <p class="drawer-tip">如果管理台已经挂在同一个网关下，通常保持默认即可。</p>
       </div>
+
       <div class="drawer-actions">
-        <button id="save-config-btn" class="primary-btn">保存并重连</button>
+        <button id="save-config-btn" class="action-btn">保存并重载</button>
       </div>
     </div>
   </div>
