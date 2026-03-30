@@ -607,13 +607,13 @@ class PatientContextRepository:
         )
         task_query = text(
             """
-            SELECT status AS label, COUNT(*)::int AS value
+            SELECT t.status AS label, COUNT(*)::int AS value
             FROM care_tasks t
             JOIN patients p ON p.id = t.patient_id
             LEFT JOIN beds b ON b.current_patient_id = p.id
             LEFT JOIN departments d ON d.id = b.department_id
             WHERE (:department_id = '' OR d.id::text = :department_id OR d.code = :department_id)
-            GROUP BY status
+            GROUP BY t.status
             ORDER BY COUNT(*) DESC
             """
         )
