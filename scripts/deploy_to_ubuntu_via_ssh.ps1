@@ -6,7 +6,7 @@ param(
   [string]$Password,
 
   [string]$ServerUser = "root",
-  [string]$BundlePath = "D:\codex\tmp\ai-nursing-server-bundle.zip",
+  [string]$BundlePath = "D:\codex\tmp\ai-nursing-server-bundle.tar",
   [string]$EnvFile = "D:\codex\tmp\ai-nursing-server.env",
   [string]$RemoteDir = "/opt/ai-nursing"
 )
@@ -33,13 +33,13 @@ try {
   $ssh = New-SSHSession -ComputerName $ServerHost -Credential $credential -AcceptKey
   $sftp = New-SFTPSession -ComputerName $ServerHost -Credential $credential -AcceptKey
 
-  Invoke-SSHCommand -SessionId $ssh.SessionId -Command "mkdir -p '$RemoteDir' && mkdir -p /root/deploy_tmp && rm -f /root/deploy_tmp/ai-nursing-server-bundle.zip /root/deploy_tmp/ai-nursing-server.env" | Out-Null
+  Invoke-SSHCommand -SessionId $ssh.SessionId -Command "mkdir -p '$RemoteDir' && mkdir -p /root/deploy_tmp && rm -f /root/deploy_tmp/ai-nursing-server-bundle.tar /root/deploy_tmp/ai-nursing-server.env && find '$RemoteDir' -mindepth 1 -maxdepth 1 ! -name '.env.server' ! -name '.venv' ! -name 'logs' -exec rm -rf {} +" | Out-Null
 
-  Set-SFTPItem -SessionId $sftp.SessionId -Path $BundlePath -Destination "/root/deploy_tmp"
-  Set-SFTPItem -SessionId $sftp.SessionId -Path $EnvFile -Destination "/root/deploy_tmp"
+  Set-SFTPItem -SessionId $sftp.SessionId -Path $BundlePath -Destination "/root/deploy_tmp/ai-nursing-server-bundle.tar"
+  Set-SFTPItem -SessionId $sftp.SessionId -Path $EnvFile -Destination "/root/deploy_tmp/ai-nursing-server.env"
 
   $remoteCommand = @"
-python3 -m zipfile -e /root/deploy_tmp/ai-nursing-server-bundle.zip '$RemoteDir'
+tar -xf /root/deploy_tmp/ai-nursing-server-bundle.tar -C '$RemoteDir'
 mv /root/deploy_tmp/ai-nursing-server.env '$RemoteDir/.env.server'
 chmod +x '$RemoteDir/scripts/deploy_backend_ubuntu.sh'
 bash '$RemoteDir/scripts/deploy_backend_ubuntu.sh'
