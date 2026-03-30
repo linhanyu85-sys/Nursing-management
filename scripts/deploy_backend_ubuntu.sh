@@ -130,7 +130,24 @@ for entry in "${SERVICES[@]}"; do
   systemctl restart "ai-nursing-${name}.service"
 done
 
-sleep 8
+wait_for_http() {
+  local url="$1"
+  local attempts="${2:-20}"
+  local delay="${3:-3}"
+  local i
+
+  for ((i=1; i<=attempts; i++)); do
+    if curl -fsS "${url}" >/dev/null; then
+      return 0
+    fi
+    sleep "${delay}"
+  done
+
+  return 1
+}
+
+wait_for_http "http://127.0.0.1:18000/health" 20 3
+wait_for_http "http://127.0.0.1:18000/api/ai/runtime" 20 3
 
 echo
 echo "API gateway health:"

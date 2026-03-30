@@ -35,12 +35,14 @@ try {
 
   Invoke-SSHCommand -SessionId $ssh.SessionId -Command "mkdir -p '$RemoteDir' && mkdir -p /root/deploy_tmp && rm -f /root/deploy_tmp/ai-nursing-server-bundle.tar /root/deploy_tmp/ai-nursing-server.env && find '$RemoteDir' -mindepth 1 -maxdepth 1 ! -name '.env.server' ! -name '.venv' ! -name 'logs' -exec rm -rf {} +" | Out-Null
 
-  Set-SFTPItem -SessionId $sftp.SessionId -Path $BundlePath -Destination "/root/deploy_tmp/ai-nursing-server-bundle.tar"
-  Set-SFTPItem -SessionId $sftp.SessionId -Path $EnvFile -Destination "/root/deploy_tmp/ai-nursing-server.env"
+  Set-SFTPItem -SessionId $sftp.SessionId -Path $BundlePath -Destination "/root/deploy_tmp"
+  Set-SFTPItem -SessionId $sftp.SessionId -Path $EnvFile -Destination "/root/deploy_tmp"
 
   $remoteCommand = @"
 tar -xf /root/deploy_tmp/ai-nursing-server-bundle.tar -C '$RemoteDir'
 mv /root/deploy_tmp/ai-nursing-server.env '$RemoteDir/.env.server'
+find '$RemoteDir/scripts' -type f -name '*.sh' -exec sed -i 's/\r$//' {} +
+sed -i '1s/^\xEF\xBB\xBF//' '$RemoteDir/.env.server'
 chmod +x '$RemoteDir/scripts/deploy_backend_ubuntu.sh'
 bash '$RemoteDir/scripts/deploy_backend_ubuntu.sh'
 "@
