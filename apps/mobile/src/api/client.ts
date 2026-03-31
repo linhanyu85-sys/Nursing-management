@@ -42,7 +42,7 @@ function resolveBase(raw: string): string {
 
 const cfgUrl =
   process.env.EXPO_PUBLIC_API_BASE_URL ||
-  (typeof __DEV__ !== "undefined" && __DEV__ ? "http://127.0.0.1:8000" : "http://47.84.99.189:8000");
+  (typeof __DEV__ !== "undefined" && __DEV__ ? "http://127.0.0.1:8000" : "http://47.84.99.189:18000");
 export const apiBaseURL = resolveBase(cfgUrl);
 
 function setPort(raw: string, p: string): string {
@@ -56,8 +56,20 @@ function setPort(raw: string, p: string): string {
   return `${host}:${p}${path}`;
 }
 
+function inferAsrPort(raw: string): string {
+  try {
+    const u = new URL(trimSlash(raw));
+    if (u.port === "18000") {
+      return "18013";
+    }
+  } catch {
+    return "8013";
+  }
+  return "8013";
+}
+
 export const asrBaseURL = resolveBase(
-  process.env.EXPO_PUBLIC_ASR_BASE_URL || setPort(apiBaseURL, "8013")
+  process.env.EXPO_PUBLIC_ASR_BASE_URL || setPort(apiBaseURL, inferAsrPort(apiBaseURL))
 );
 
 export const httpClient = axios.create({
