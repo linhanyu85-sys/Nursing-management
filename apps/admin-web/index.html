@@ -1,0 +1,128 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>医疗 AI 后台管理中心</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
+  <link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght@300;400;500;700" rel="stylesheet" />
+  <link rel="stylesheet" href="./assets/styles.css" />
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="brand-icon">
+          <span class="material-symbols-outlined">health_and_safety</span>
+        </div>
+        <div class="brand-text">
+          <h1>医疗 AI 后台</h1>
+          <p>Admin Console</p>
+        </div>
+      </div>
+
+      <nav class="nav-list" id="nav-list">
+        <button class="nav-item active" data-view="accounts">
+          <span class="material-symbols-outlined">admin_panel_settings</span>
+          <span>账号中心</span>
+        </button>
+        <button class="nav-item" data-view="dashboard">
+          <span class="material-symbols-outlined">dashboard</span>
+          <span>系统总览</span>
+        </button>
+        <button class="nav-item" data-view="patients">
+          <span class="material-symbols-outlined">group</span>
+          <span>患者床位</span>
+        </button>
+        <button class="nav-item" data-view="drafts">
+          <span class="material-symbols-outlined">description</span>
+          <span>草稿与结果</span>
+        </button>
+        <button class="nav-item" data-view="audit">
+          <span class="material-symbols-outlined">fact_check</span>
+          <span>审计日志</span>
+        </button>
+        <button class="nav-item" data-view="monitor">
+          <span class="material-symbols-outlined">lan</span>
+          <span>三端联通</span>
+        </button>
+      </nav>
+
+      <div class="sidebar-footer">
+        <div class="owner-card">
+          <div class="owner-avatar" id="owner-avatar">?</div>
+          <div>
+            <div class="owner-name" id="owner-name">未选择账号</div>
+            <div class="owner-id" id="owner-id">-</div>
+          </div>
+        </div>
+      </div>
+    </aside>
+
+    <main class="main">
+      <header class="topbar">
+        <div class="search-wrap">
+          <span class="material-symbols-outlined">search</span>
+          <input id="global-search" type="text" placeholder="搜索床位、患者、ID、审计动作..." />
+        </div>
+        <div class="top-actions">
+          <div class="account-switcher">
+            <label for="account-select">当前账号</label>
+            <select id="account-select"></select>
+            <button id="switch-account-btn" class="btn btn-sm">切换</button>
+          </div>
+          <button id="gateway-status" class="chip">网关检测中</button>
+          <button id="e2e-check-btn" class="btn btn-primary btn-sm">一键联调</button>
+          <button id="refresh-btn" class="icon-btn" title="刷新">
+            <span class="material-symbols-outlined">refresh</span>
+          </button>
+          <button id="open-config-btn" class="icon-btn" title="配置">
+            <span class="material-symbols-outlined">settings</span>
+          </button>
+        </div>
+      </header>
+
+      <section id="view-root" class="view-root">
+        <div class="loading-wrap">
+          <div class="spinner"></div>
+          <p>正在加载管理数据...</p>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <div class="modal hidden" id="config-modal">
+    <div class="modal-card">
+      <div class="modal-head">
+        <h2>连接配置</h2>
+        <button id="close-config-btn" class="icon-btn">
+          <span class="material-symbols-outlined">close</span>
+        </button>
+      </div>
+      <div class="form-grid">
+        <label>API 网关地址
+          <input id="cfg-api-base" type="text" placeholder="http://127.0.0.1:8000" />
+        </label>
+        <label>病区 ID
+          <input id="cfg-department" type="text" placeholder="dep-card-01" />
+        </label>
+        <label>床位开始
+          <input id="cfg-bed-start" type="number" min="1" value="1" />
+        </label>
+        <label>床位结束
+          <input id="cfg-bed-end" type="number" min="1" value="40" />
+        </label>
+      </div>
+      <div class="modal-actions">
+        <button id="bind-device-btn" class="btn">绑定设备到当前账号</button>
+        <button id="save-config-btn" class="btn btn-primary">保存</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="toast-stack" class="toast-stack"></div>
+  <script src="./assets/app.js"></script>
+</body>
+</html>

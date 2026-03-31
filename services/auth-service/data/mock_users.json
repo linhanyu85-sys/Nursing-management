@@ -1,0 +1,156 @@
+{
+  "nurse01": {
+    "password": "123456",
+    "id": "u_nurse_01",
+    "full_name": "\u5f20\u62a4\u58eb",
+    "role_code": "nurse",
+    "phone": null
+  },
+  "doctor01": {
+    "password": "123456",
+    "id": "u_doctor_01",
+    "full_name": "\u674e\u533b\u751f",
+    "role_code": "attending_doctor",
+    "phone": null
+  },
+  "rn44168": {
+    "password": "123456",
+    "id": "u_rn44168",
+    "full_name": "??????",
+    "role_code": "nurse",
+    "phone": null
+  },
+  "rn38483": {
+    "password": "123456",
+    "id": "u_rn38483",
+    "full_name": "Nurse Test",
+    "role_code": "nurse",
+    "phone": null
+  },
+  "\u5c0f\u7f8e\u4e3d": {
+    "password": "ww772305",
+    "id": "u_\u5c0f\u7f8e\u4e3d",
+    "full_name": "\u6797\u7f8e\u4e3d",
+    "role_code": "nurse",
+    "phone": null
+  },
+  "linmeili": {
+    "password": "ww772305",
+    "id": "u_linmeili",
+    "full_name": "\u6797\u7f8e\u4e3d",
+    "role_code": "nurse",
+    "phone": null
+  },
+  "nurse_test_2472": {
+    "password": "123456",
+    "id": "u_nurse_test_2472",
+    "full_name": "????",
+    "role_code": "nurse",
+    "phone": null
+  },
+  "nurse_x64519": {
+    "password": "123456",
+    "id": "u_nurse_x64519",
+    "full_name": "????",
+    "role_code": "nurse",
+    "phone": null
+  },
+  "test_nurse_6158": {
+    "password": "123456",
+    "id": "u_test_nurse_6158",
+    "full_name": "????",
+    "role_code": "nurse",
+    "phone": null
+  },
+  "test_senior_nurse_4111": {
+    "password": "123456",
+    "id": "u_test_senior_nurse_4111",
+    "full_name": "????",
+    "role_code": "senior_nurse",
+    "phone": null
+  },
+  "test_attending_doctor_8071": {
+    "password": "123456",
+    "id": "u_test_attending_doctor_8071",
+    "full_name": "????",
+    "role_code": "attending_doctor",
+    "phone": null
+  },
+  "test_admin_7850": {
+    "password": "123456",
+    "id": "u_test_admin_7850",
+    "full_name": "????",
+    "role_code": "admin",
+    "phone": null
+  },
+  "nurse_live_66041": {
+    "password": "123456",
+    "id": "u_nurse_live_66041",
+    "full_name": "????",
+    "role_code": "nurse",
+    "phone": null
+  },
+  "linhushi_new": {
+    "password": "123456",
+    "id": "u_linhushi_new",
+    "full_name": "???",
+    "role_code": "nurse",
+    "phone": null
+  },
+  "u71691": {
+    "password": "123456",
+    "id": "u_u71691",
+    "full_name": "????",
+    "role_code": "nurse",
+    "phone": null
+  },
+  "linmeili_3953": {
+    "password": "123456",
+    "id": "u_linmeili_3953",
+    "full_name": "???",
+    "role_code": "nurse",
+    "phone": null
+  },
+  "zz_badrole_8769": {
+    "password": "123456",
+    "id": "u_zz_badrole_8769",
+    "full_name": "??",
+    "role_code": "tester",
+    "phone": null
+  },
+  "role_test_7990": {
+    "password": "123456",
+    "id": "u_role_test_7990",
+    "full_name": "????",
+    "role_code": "doctor",
+    "phone": null
+  },
+  "role_test_7990_x": {
+    "password": "123456",
+    "id": "u_role_test_7990_x",
+    "full_name": "????",
+    "role_code": "tester",
+    "phone": null
+  },
+  "pf_nurse_6098": {
+    "password": "123456",
+    "id": "u_pf_nurse_6098",
+    "full_name": "preflight nurse",
+    "role_code": "nurse",
+    "phone": null
+  },
+  "pf_nurse_4753": {
+    "password": "123456",
+    "id": "u_pf_nurse_4753",
+    "full_name": "preflight nurse",
+    "role_code": "nurse",
+    "phone": null
+  },
+  "pf_nurse_9988": {
+    "password": "123456",
+    "id": "u_pf_nurse_9988",
+    "full_name": "preflight nurse",
+    "role_code": "nurse",
+    "phone": null
+  }
+}

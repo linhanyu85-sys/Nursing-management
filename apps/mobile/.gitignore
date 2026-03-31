@@ -1,0 +1,9 @@
+.env
+.env.local
+.env.*
+!.env.example
+.expo/
+.expo*.log
+.expo_*.log
+node_modules/
+build/

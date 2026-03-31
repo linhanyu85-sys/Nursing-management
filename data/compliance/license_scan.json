@@ -1,0 +1,203 @@
+﻿{
+    "summary":  {
+                    "generated_at":  "2026-03-25 17:00:32 +08:00",
+                    "total":  24,
+                    "ok":  6,
+                    "review_required":  17,
+                    "restricted":  1
+                },
+    "records":  [
+                    {
+                        "component":  "FunASR-Paraformer-ZH",
+                        "type":  "model_asset",
+                        "license":  "Apache-2.0",
+                        "risk":  "ok",
+                        "evidence":  "ai model\\FunASR-Paraformer-ZH\\README.md",
+                        "notes":  "readme_only"
+                    },
+                    {
+                        "component":  "medplum",
+                        "type":  "open_source_base",
+                        "license":  "Apache-2.0",
+                        "risk":  "ok",
+                        "evidence":  "open_source_bases\\medplum\\LICENSE.txt",
+                        "notes":  "license_file"
+                    },
+                    {
+                        "component":  "medplum-chart-demo",
+                        "type":  "open_source_base",
+                        "license":  "Apache-2.0",
+                        "risk":  "ok",
+                        "evidence":  "open_source_bases\\medplum-chart-demo\\LICENSE.txt",
+                        "notes":  "license_file"
+                    },
+                    {
+                        "component":  "medplum-chat-app",
+                        "type":  "open_source_base",
+                        "license":  "MIT",
+                        "risk":  "ok",
+                        "evidence":  "open_source_bases\\medplum-chat-app\\LICENSE.txt",
+                        "notes":  "license_file"
+                    },
+                    {
+                        "component":  "medplum-provider",
+                        "type":  "open_source_base",
+                        "license":  "Apache-2.0",
+                        "risk":  "ok",
+                        "evidence":  "open_source_bases\\medplum-provider\\LICENSE.txt",
+                        "notes":  "license_file"
+                    },
+                    {
+                        "component":  "medplum-react-native-example",
+                        "type":  "open_source_base",
+                        "license":  "Apache-2.0",
+                        "risk":  "ok",
+                        "evidence":  "open_source_bases\\medplum-react-native-example\\LICENSE.txt",
+                        "notes":  "license_file"
+                    },
+                    {
+                        "component":  "medgemma-4b-it",
+                        "type":  "model_asset",
+                        "license":  "CUSTOM-TERMS",
+                        "risk":  "restricted",
+                        "evidence":  "ai model\\medgemma-4b-it\\README.md",
+                        "notes":  "readme_only"
+                    },
+                    {
+                        "component":  "CosyVoice-300M-Instruct",
+                        "type":  "model_asset",
+                        "license":  "UNKNOWN",
+                        "risk":  "review_required",
+                        "evidence":  "ai model\\CosyVoice-300M-Instruct\\README.md",
+                        "notes":  "readme_only"
+                    },
+                    {
+                        "component":  "Hulu-Med",
+                        "type":  "model_asset",
+                        "license":  "UNKNOWN",
+                        "risk":  "review_required",
+                        "evidence":  "ai model\\Hulu-Med",
+                        "notes":  "missing_license_text"
+                    },
+                    {
+                        "component":  "local_cn",
+                        "type":  "model_asset",
+                        "license":  "UNKNOWN",
+                        "risk":  "review_required",
+                        "evidence":  "ai model\\local_cn",
+                        "notes":  "missing_license_text"
+                    },
+                    {
+                        "component":  "mobile-app",
+                        "type":  "node_manifest",
+                        "license":  "UNRESOLVED",
+                        "risk":  "review_required",
+                        "evidence":  "apps\\mobile\\package.json",
+                        "notes":  "npm dependencies require separate SPDX export"
+                    },
+                    {
+                        "component":  "agent-orchestrator",
+                        "type":  "python_manifest",
+                        "license":  "UNRESOLVED",
+                        "risk":  "review_required",
+                        "evidence":  "services\\agent-orchestrator\\requirements.txt",
+                        "notes":  "requirements_count=10"
+                    },
+                    {
+                        "component":  "api-gateway",
+                        "type":  "python_manifest",
+                        "license":  "UNRESOLVED",
+                        "risk":  "review_required",
+                        "evidence":  "services\\api-gateway\\requirements.txt",
+                        "notes":  "requirements_count=9"
+                    },
+                    {
+                        "component":  "asr-service",
+                        "type":  "python_manifest",
+                        "license":  "UNRESOLVED",
+                        "risk":  "review_required",
+                        "evidence":  "services\\asr-service\\requirements.txt",
+                        "notes":  "requirements_count=10"
+                    },
+                    {
+                        "component":  "audit-service",
+                        "type":  "python_manifest",
+                        "license":  "UNRESOLVED",
+                        "risk":  "review_required",
+                        "evidence":  "services\\audit-service\\requirements.txt",
+                        "notes":  "requirements_count=9"
+                    },
+                    {
+                        "component":  "auth-service",
+                        "type":  "python_manifest",
+                        "license":  "UNRESOLVED",
+                        "risk":  "review_required",
+                        "evidence":  "services\\auth-service\\requirements.txt",
+                        "notes":  "requirements_count=9"
+                    },
+                    {
+                        "component":  "collaboration-service",
+                        "type":  "python_manifest",
+                        "license":  "UNRESOLVED",
+                        "risk":  "review_required",
+                        "evidence":  "services\\collaboration-service\\requirements.txt",
+                        "notes":  "requirements_count=9"
+                    },
+                    {
+                        "component":  "device-gateway",
+                        "type":  "python_manifest",
+                        "license":  "UNRESOLVED",
+                        "risk":  "review_required",
+                        "evidence":  "services\\device-gateway\\requirements.txt",
+                        "notes":  "requirements_count=8"
+                    },
+                    {
+                        "component":  "document-service",
+                        "type":  "python_manifest",
+                        "license":  "UNRESOLVED",
+                        "risk":  "review_required",
+                        "evidence":  "services\\document-service\\requirements.txt",
+                        "notes":  "requirements_count=9"
+                    },
+                    {
+                        "component":  "handover-service",
+                        "type":  "python_manifest",
+                        "license":  "UNRESOLVED",
+                        "risk":  "review_required",
+                        "evidence":  "services\\handover-service\\requirements.txt",
+                        "notes":  "requirements_count=9"
+                    },
+                    {
+                        "component":  "multimodal-med-service",
+                        "type":  "python_manifest",
+                        "license":  "UNRESOLVED",
+                        "risk":  "review_required",
+                        "evidence":  "services\\multimodal-med-service\\requirements.txt",
+                        "notes":  "requirements_count=9"
+                    },
+                    {
+                        "component":  "patient-context-service",
+                        "type":  "python_manifest",
+                        "license":  "UNRESOLVED",
+                        "risk":  "review_required",
+                        "evidence":  "services\\patient-context-service\\requirements.txt",
+                        "notes":  "requirements_count=9"
+                    },
+                    {
+                        "component":  "recommendation-service",
+                        "type":  "python_manifest",
+                        "license":  "UNRESOLVED",
+                        "risk":  "review_required",
+                        "evidence":  "services\\recommendation-service\\requirements.txt",
+                        "notes":  "requirements_count=9"
+                    },
+                    {
+                        "component":  "tts-service",
+                        "type":  "python_manifest",
+                        "license":  "UNRESOLVED",
+                        "risk":  "review_required",
+                        "evidence":  "services\\tts-service\\requirements.txt",
+                        "notes":  "requirements_count=10"
+                    }
+                ]
+}

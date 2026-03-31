@@ -1,0 +1,1352 @@
+from __future__ import annotations
+
+import asyncio
+import base64
+import io
+import json
+import logging
+import re
+import uuid
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from fractions import Fraction
+from typing import Any
+import wave
+
+import httpx
+from fastapi import APIRouter, File, Form, HTTPException, Request, Response, UploadFile, WebSocket, WebSocketDisconnect
+from pydantic import BaseModel, Field
+from starlette.websockets import WebSocketState
+
+from app.core.config import settings
+
+try:
+    import av  # type: ignore
+except Exception:  # pragma: no cover
+    av = None  # type: ignore[assignment]
+
+try:
+    import numpy as np  # type: ignore
+except Exception:  # pragma: no cover
+    np = None  # type: ignore[assignment]
+
+router = APIRouter()
+logger = logging.getLogger(__name__)
+
+
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _iso_now() -> str:
+    return _utc_now().isoformat()
+
+
+def _timezone_offset_minutes() -> int:
+    offset = datetime.now().astimezone().utcoffset()
+    if offset is None:
+        return 0
+    return int(offset.total_seconds() // 60)
+
+
+def _split_tts_sentences(text: str) -> list[str]:
+    plain = (text or "").strip()
+    if not plain:
+        return []
+    chunks = re.split(r"(?<=[.!?;。！？；])\s*", plain)
+    normalized = [chunk.strip() for chunk in chunks if chunk.strip()]
+    return normalized or [plain]
+
+
+def _extract_bed_no(text: str) -> str | None:
+    plain = (text or "").strip()
+    if not plain:
+        return None
+    match = re.search(r"(\d{1,3})\s*床", plain)
+    if match:
+        return match.group(1)
+    match = re.search(r"\bbed\s*(\d{1,3})\b", plain, flags=re.IGNORECASE)
+    if match:
+        return match.group(1)
+    return None
+
+
+def _extract_bed_no(text: str) -> str | None:
+    plain = (text or "").strip()
+    if not plain:
+        return None
+    for pattern in (
+        r"(\d{1,3})\s*(?:床|号床|床位)",
+        r"\bbed\s*(\d{1,3})\b",
+        r"\b(\d{1,3})\s*bed\b",
+    ):
+        match = re.search(pattern, plain, flags=re.IGNORECASE)
+        if match:
+            return str(int(match.group(1)))
+    match = re.search(r"(?<!\d)(\d{1,3})(?!\d)", plain)
+    if match:
+        value = int(match.group(1))
+        if 1 <= value <= 199:
+            return str(value)
+    return None
+
+
+def _request_ws_url(request: Request) -> str:
+    if settings.device_public_ws_url:
+        return settings.device_public_ws_url.strip()
+    host = request.headers.get("x-forwarded-host") or request.headers.get("host") or request.url.netloc
+    proto = request.headers.get("x-forwarded-proto") or request.url.scheme
+    ws_scheme = "wss" if str(proto).lower() == "https" else "ws"
+    ws_path = settings.device_ws_path if settings.device_ws_path.startswith("/") else f"/{settings.device_ws_path}"
+    return f"{ws_scheme}://{host}{ws_path}"
+
+
+def _decode_ws_audio_payload(frame_bytes: bytes) -> bytes:
+    raw = bytes(frame_bytes or b"")
+    if len(raw) < 4:
+        return raw
+    # BinaryProtocol3:
+    # [0] type, [1] reserved, [2:4] payload_size (big-endian), [4:] payload
+    payload_size = int.from_bytes(raw[2:4], byteorder="big", signed=False)
+    if payload_size <= 0:
+        return b""
+    if payload_size <= len(raw) - 4:
+        return raw[4 : 4 + payload_size]
+    return raw
+
+
+def _audio_frames_to_ndarray(frames: list[Any], target_sample_rate: int) -> list[Any]:
+    if av is None or np is None:
+        return []
+    arrays: list[Any] = []
+    resampler = av.audio.resampler.AudioResampler(
+        format="s16",
+        layout="mono",
+        rate=target_sample_rate,
+    )
+    for frame in frames:
+        resampled = resampler.resample(frame)
+        if resampled is None:
+            continue
+        frame_list = resampled if isinstance(resampled, list) else [resampled]
+        for item in frame_list:
+            data = item.to_ndarray()
+            if data.ndim > 1:
+                data = data[0]
+            if data.dtype != np.int16:
+                data = data.astype(np.int16)
+            arrays.append(data.reshape(-1))
+    return arrays
+
+
+def _opus_packets_to_wav_bytes(opus_packets: list[bytes], target_sample_rate: int = 16000) -> bytes:
+    if av is None or np is None or not opus_packets:
+        return b""
+    try:
+        decoder = av.codec.CodecContext.create("libopus", "r")
+        decoder.sample_rate = target_sample_rate
+        decoder.layout = "mono"
+        decoder.open()
+    except Exception as exc:
+        logger.warning("opus_decoder_init_failed: %s", exc)
+        return b""
+
+    pcm_chunks: list[Any] = []
+    for packet_bytes in opus_packets:
+        if not packet_bytes:
+            continue
+        try:
+            decoded = decoder.decode(av.packet.Packet(packet_bytes))
+        except Exception:
+            continue
+        pcm_chunks.extend(_audio_frames_to_ndarray(decoded, target_sample_rate))
+
+    try:
+        flushed = decoder.decode(None)
+    except Exception:
+        flushed = []
+    pcm_chunks.extend(_audio_frames_to_ndarray(flushed, target_sample_rate))
+
+    if not pcm_chunks:
+        return b""
+
+    pcm = np.concatenate(pcm_chunks).astype(np.int16, copy=False)
+    with io.BytesIO() as output:
+        with wave.open(output, "wb") as wav_file:
+            wav_file.setnchannels(1)
+            wav_file.setsampwidth(2)
+            wav_file.setframerate(target_sample_rate)
+            wav_file.writeframes(pcm.tobytes())
+        return output.getvalue()
+
+
+def _wav_bytes_to_opus_packets(
+    wav_bytes: bytes,
+    *,
+    target_sample_rate: int = 16000,
+    frame_duration_ms: int = 20,
+) -> list[bytes]:
+    if av is None or np is None or not wav_bytes:
+        return []
+
+    try:
+        source = av.open(io.BytesIO(wav_bytes), mode="r")
+    except Exception as exc:
+        logger.warning("wav_open_failed: %s", exc)
+        return []
+
+    audio_stream = next((stream for stream in source.streams if stream.type == "audio"), None)
+    if audio_stream is None:
+        source.close()
+        return []
+
+    try:
+        encoder = av.codec.CodecContext.create("libopus", "w")
+        encoder.sample_rate = target_sample_rate
+        encoder.layout = "mono"
+        encoder.format = "s16"
+        encoder.time_base = Fraction(1, target_sample_rate)
+        encoder.options = {"frame_duration": str(frame_duration_ms)}
+        encoder.open()
+    except Exception as exc:
+        source.close()
+        logger.warning("opus_encoder_init_failed: %s", exc)
+        return []
+
+    frame_samples = max(encoder.frame_size or int(target_sample_rate * frame_duration_ms / 1000), 1)
+    resampler = av.audio.resampler.AudioResampler(
+        format="s16",
+        layout="mono",
+        rate=target_sample_rate,
+    )
+
+    packets: list[bytes] = []
+    pending = np.zeros(0, dtype=np.int16)
+
+    def encode_pending_chunk(chunk: Any) -> None:
+        audio_frame = av.AudioFrame.from_ndarray(chunk.reshape(1, -1), format="s16", layout="mono")
+        audio_frame.sample_rate = target_sample_rate
+        for packet in encoder.encode(audio_frame):
+            packets.append(bytes(packet))
+
+    try:
+        for decoded in source.decode(audio_stream):
+            resampled = resampler.resample(decoded)
+            if resampled is None:
+                continue
+            frame_list = resampled if isinstance(resampled, list) else [resampled]
+            for frame in frame_list:
+                data = frame.to_ndarray()
+                if data.ndim > 1:
+                    data = data[0]
+                if data.dtype != np.int16:
+                    data = data.astype(np.int16)
+                pending = np.concatenate((pending, data.reshape(-1)))
+                while pending.size >= frame_samples:
+                    chunk = pending[:frame_samples]
+                    pending = pending[frame_samples:]
+                    encode_pending_chunk(chunk)
+
+        if pending.size > 0:
+            padded = np.pad(pending, (0, frame_samples - pending.size), mode="constant")
+            encode_pending_chunk(padded)
+
+        for packet in encoder.encode(None):
+            packets.append(bytes(packet))
+    finally:
+        source.close()
+
+    return [packet for packet in packets if packet]
+
+
+def _pack_ws_binary_v3(payload: bytes) -> bytes:
+    if not payload:
+        return b""
+    size = len(payload)
+    if size > 65535:
+        return b""
+    return bytes((0, 0)) + size.to_bytes(2, byteorder="big", signed=False) + payload
+
+
+async def _send_ws_audio_packets(websocket: WebSocket, packets: list[bytes], pace_ms: int = 20) -> None:
+    if websocket.client_state != WebSocketState.CONNECTED:
+        return
+    delay = max(pace_ms, 0) / 1000.0
+    for payload in packets:
+        framed = _pack_ws_binary_v3(payload)
+        if not framed:
+            continue
+        if websocket.client_state != WebSocketState.CONNECTED:
+            break
+        await websocket.send_bytes(framed)
+        if delay:
+            await asyncio.sleep(delay)
+
+
+def _client_peer(ws: WebSocket) -> str:
+    if ws.client is None:
+        return "unknown"
+    return f"{ws.client.host}:{ws.client.port}"
+
+
+def _new_session_id() -> str:
+    return f"{settings.device_session_prefix}-{uuid.uuid4()}"
+
+
+class MockReplyPayload(BaseModel):
+    stt_text: str | None = Field(default=None, description="Optional text for STT event")
+    tts_text: str = Field(..., min_length=1, description="Text to be spoken back to device")
+    once: bool = Field(default=True, description="true=use once, false=sticky")
+
+
+class DeviceQueryPayload(BaseModel):
+    device_id: str | None = None
+    session_id: str
+    text: str = ""
+    mode: str = "patient_query"
+    department_id: str | None = None
+    requested_by: str | None = None
+
+
+class DeviceBindPayload(BaseModel):
+    user_id: str | None = None
+    username: str | None = None
+
+
+class DeviceHeartbeatPayload(BaseModel):
+    device_id: str
+    battery: int | None = None
+    wifi_rssi: int | None = None
+    status: str = "idle"
+
+
+@dataclass
+class PendingReply:
+    stt_text: str | None
+    tts_text: str
+    once: bool = True
+
+
+@dataclass
+class SessionState:
+    connection_id: str
+    client: str
+    created_at: str
+    last_seen_at: str
+    session_id: str = ""
+    listening: bool = False
+    listening_mode: str = ""
+    binary_frames: int = 0
+    audio_bytes: int = 0
+    text_frames: int = 0
+    turn_count: int = 0
+    last_client_event: str = ""
+    last_detect_text: str = ""
+    last_stt_text: str = ""
+    last_tts_text: str = ""
+    last_error: str = ""
+    owner_user_id: str = ""
+    owner_username: str = ""
+
+
+class GatewayRuntime:
+    def __init__(self) -> None:
+        self._lock = asyncio.Lock()
+        self._sessions: dict[str, SessionState] = {}
+        self._session_tasks: dict[str, asyncio.Task[Any]] = {}
+        self._turn_tasks: dict[str, asyncio.Task[Any]] = {}
+        self._audio_buffers: dict[str, bytearray] = {}
+        self._audio_packets: dict[str, list[bytes]] = {}
+        self._uploaded_audio: dict[str, bytes] = {}
+        self._turns: dict[str, dict[str, Any]] = {}
+        self._heartbeats: dict[str, dict[str, Any]] = {}
+        self._next_reply_once: PendingReply | None = None
+        self._sticky_reply: PendingReply | None = None
+        self._device_owner_user_id: str = (settings.device_owner_user_id or "u_linmeili").strip() or "u_linmeili"
+        self._device_owner_username: str = (settings.device_owner_username or "linmeili").strip() or "linmeili"
+
+    async def add_session(self, connection_id: str, client: str) -> None:
+        now = _iso_now()
+        async with self._lock:
+            self._sessions[connection_id] = SessionState(
+                connection_id=connection_id,
+                client=client,
+                created_at=now,
+                last_seen_at=now,
+                owner_user_id=self._device_owner_user_id,
+                owner_username=self._device_owner_username,
+            )
+            self._audio_buffers[connection_id] = bytearray()
+            self._audio_packets[connection_id] = []
+
+    async def set_device_owner(self, *, user_id: str | None = None, username: str | None = None) -> dict[str, str]:
+        async with self._lock:
+            if user_id is not None:
+                normalized_user_id = (user_id or "").strip()
+                if normalized_user_id:
+                    self._device_owner_user_id = normalized_user_id
+            if username is not None:
+                normalized_username = (username or "").strip()
+                if normalized_username:
+                    self._device_owner_username = normalized_username
+            for state in self._sessions.values():
+                state.owner_user_id = self._device_owner_user_id
+                state.owner_username = self._device_owner_username
+            return {
+                "user_id": self._device_owner_user_id,
+                "username": self._device_owner_username,
+            }
+
+    async def get_device_owner(self) -> dict[str, str]:
+        async with self._lock:
+            return {
+                "user_id": self._device_owner_user_id,
+                "username": self._device_owner_username,
+            }
+
+    async def remove_session(self, connection_id: str) -> None:
+        session_task: asyncio.Task[Any] | None = None
+        async with self._lock:
+            self._sessions.pop(connection_id, None)
+            self._audio_buffers.pop(connection_id, None)
+            self._audio_packets.pop(connection_id, None)
+            session_task = self._session_tasks.pop(connection_id, None)
+        if session_task and not session_task.done():
+            session_task.cancel()
+            try:
+                await session_task
+            except asyncio.CancelledError:
+                pass
+
+    async def attach_session_task(self, connection_id: str, task: asyncio.Task[Any]) -> None:
+        previous: asyncio.Task[Any] | None = None
+        async with self._lock:
+            previous = self._session_tasks.pop(connection_id, None)
+            self._session_tasks[connection_id] = task
+        if previous and not previous.done():
+            previous.cancel()
+            try:
+                await previous
+            except asyncio.CancelledError:
+                pass
+
+    async def cancel_session_task(self, connection_id: str) -> None:
+        task: asyncio.Task[Any] | None = None
+        async with self._lock:
+            task = self._session_tasks.pop(connection_id, None)
+        if task and not task.done():
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
+    async def attach_turn_task(self, session_id: str, task: asyncio.Task[Any]) -> None:
+        previous: asyncio.Task[Any] | None = None
+        async with self._lock:
+            previous = self._turn_tasks.pop(session_id, None)
+            self._turn_tasks[session_id] = task
+        if previous and not previous.done():
+            previous.cancel()
+            try:
+                await previous
+            except asyncio.CancelledError:
+                pass
+
+    async def set_session_id(self, connection_id: str, session_id: str) -> None:
+        async with self._lock:
+            state = self._sessions.get(connection_id)
+            if state:
+                state.session_id = session_id
+                state.last_seen_at = _iso_now()
+
+    async def get_session_id(self, connection_id: str) -> str:
+        async with self._lock:
+            state = self._sessions.get(connection_id)
+            return state.session_id if state else ""
+
+    async def set_listening(self, connection_id: str, listening: bool, mode: str = "") -> None:
+        async with self._lock:
+            state = self._sessions.get(connection_id)
+            if state:
+                state.listening = listening
+                if mode:
+                    state.listening_mode = mode
+                state.last_seen_at = _iso_now()
+
+    async def mark_text_frame(self, connection_id: str, event: str = "") -> None:
+        async with self._lock:
+            state = self._sessions.get(connection_id)
+            if state:
+                state.text_frames += 1
+                state.last_seen_at = _iso_now()
+                if event:
+                    state.last_client_event = event
+
+    async def append_audio_frame(self, connection_id: str, data: bytes) -> None:
+        append_bytes = bytes(data or b"")
+        if not append_bytes:
+            return
+        async with self._lock:
+            state = self._sessions.get(connection_id)
+            buffer = self._audio_buffers.get(connection_id)
+            packets = self._audio_packets.get(connection_id)
+            if state:
+                state.binary_frames += 1
+                state.audio_bytes += len(append_bytes)
+                state.last_seen_at = _iso_now()
+            if buffer is not None:
+                buffer.extend(append_bytes)
+                max_bytes = max(settings.device_max_audio_buffer_bytes, 0)
+                if max_bytes and len(buffer) > max_bytes:
+                    overflow = len(buffer) - max_bytes
+                    del buffer[:overflow]
+            if packets is not None:
+                packets.append(append_bytes)
+
+    async def consume_audio_buffer(self, connection_id: str) -> bytes:
+        async with self._lock:
+            buffer = self._audio_buffers.get(connection_id)
+            if buffer is None:
+                return b""
+            raw = bytes(buffer)
+            buffer.clear()
+            return raw
+
+    async def consume_audio_packets(self, connection_id: str) -> list[bytes]:
+        async with self._lock:
+            packets = self._audio_packets.get(connection_id)
+            if packets is None:
+                return []
+            copied = [bytes(packet) for packet in packets]
+            packets.clear()
+            return copied
+
+    async def clear_audio_buffer(self, connection_id: str) -> None:
+        async with self._lock:
+            buffer = self._audio_buffers.get(connection_id)
+            packets = self._audio_packets.get(connection_id)
+            if buffer is not None:
+                buffer.clear()
+            if packets is not None:
+                packets.clear()
+
+    async def set_detect_text(self, connection_id: str, text: str) -> None:
+        normalized = (text or "").strip()
+        if not normalized:
+            return
+        async with self._lock:
+            state = self._sessions.get(connection_id)
+            if state:
+                state.last_detect_text = normalized
+                state.last_seen_at = _iso_now()
+
+    async def consume_detect_text(self, connection_id: str) -> str:
+        async with self._lock:
+            state = self._sessions.get(connection_id)
+            if not state:
+                return ""
+            text = state.last_detect_text.strip()
+            state.last_detect_text = ""
+            state.last_seen_at = _iso_now()
+            return text
+
+    async def set_turn_text(self, connection_id: str, stt_text: str | None = None, tts_text: str | None = None) -> None:
+        async with self._lock:
+            state = self._sessions.get(connection_id)
+            if not state:
+                return
+            if stt_text is not None:
+                state.last_stt_text = stt_text
+            if tts_text is not None:
+                state.last_tts_text = tts_text
+                state.turn_count += 1
+            state.last_seen_at = _iso_now()
+
+    async def set_last_error(self, connection_id: str, error_text: str) -> None:
+        async with self._lock:
+            state = self._sessions.get(connection_id)
+            if state:
+                state.last_error = (error_text or "").strip()
+                state.last_seen_at = _iso_now()
+
+    async def list_sessions(self) -> list[dict[str, Any]]:
+        async with self._lock:
+            return [
+                {
+                    "connection_id": s.connection_id,
+                    "session_id": s.session_id,
+                    "client": s.client,
+                    "created_at": s.created_at,
+                    "last_seen_at": s.last_seen_at,
+                    "listening": s.listening,
+                    "listening_mode": s.listening_mode,
+                    "binary_frames": s.binary_frames,
+                    "audio_bytes": s.audio_bytes,
+                    "text_frames": s.text_frames,
+                    "turn_count": s.turn_count,
+                    "last_client_event": s.last_client_event,
+                    "last_detect_text": s.last_detect_text,
+                    "last_stt_text": s.last_stt_text,
+                    "last_tts_text": s.last_tts_text,
+                    "last_error": s.last_error,
+                    "owner_user_id": s.owner_user_id or self._device_owner_user_id,
+                    "owner_username": s.owner_username or self._device_owner_username,
+                }
+                for s in self._sessions.values()
+            ]
+
+    async def set_mock_reply(self, payload: MockReplyPayload) -> None:
+        reply = PendingReply(stt_text=payload.stt_text, tts_text=payload.tts_text.strip(), once=payload.once)
+        async with self._lock:
+            if payload.once:
+                self._next_reply_once = reply
+            else:
+                self._sticky_reply = reply
+
+    async def clear_mock_reply(self) -> None:
+        async with self._lock:
+            self._next_reply_once = None
+            self._sticky_reply = None
+
+    async def consume_reply(self) -> PendingReply:
+        async with self._lock:
+            if self._next_reply_once is not None:
+                reply = self._next_reply_once
+                self._next_reply_once = None
+                return reply
+            if self._sticky_reply is not None:
+                return self._sticky_reply
+        return PendingReply(
+            stt_text=settings.device_default_stt_text,
+            tts_text=settings.device_default_tts_text,
+            once=True,
+        )
+
+    async def save_uploaded_audio(self, session_id: str, audio_bytes: bytes) -> None:
+        async with self._lock:
+            self._uploaded_audio[session_id] = bytes(audio_bytes or b"")
+
+    async def get_uploaded_audio(self, session_id: str) -> bytes:
+        async with self._lock:
+            return bytes(self._uploaded_audio.get(session_id, b""))
+
+    async def upsert_turn(self, session_id: str, patch: dict[str, Any]) -> dict[str, Any]:
+        async with self._lock:
+            turn = self._turns.get(session_id)
+            if turn is None:
+                turn = {
+                    "session_id": session_id,
+                    "device_id": settings.device_id_default,
+                    "requested_by": settings.device_owner_user_id,
+                    "owner_username": settings.device_owner_username,
+                    "status": "waiting",
+                    "mode": "patient_query",
+                    "summary": "",
+                    "stt_text": "",
+                    "findings": [],
+                    "recommendations": [],
+                    "confidence": 0.0,
+                    "review_required": True,
+                    "audio_ready": False,
+                    "audio_base64": "",
+                    "audio_mime": "audio/wav",
+                    "source": "http",
+                    "error": "",
+                    "input_text": "",
+                    "input_audio_bytes": 0,
+                    "created_at": _iso_now(),
+                    "updated_at": _iso_now(),
+                }
+                self._turns[session_id] = turn
+            for key, value in patch.items():
+                turn[key] = value
+            turn["updated_at"] = _iso_now()
+            return dict(turn)
+
+    async def get_turn(self, session_id: str) -> dict[str, Any] | None:
+        async with self._lock:
+            turn = self._turns.get(session_id)
+            return dict(turn) if turn else None
+
+    async def set_heartbeat(self, device_id: str, payload: dict[str, Any]) -> None:
+        async with self._lock:
+            now = _iso_now()
+            body = dict(payload)
+            body["device_id"] = device_id
+            body["at"] = now
+            self._heartbeats[device_id] = body
+
+    async def get_heartbeat(self, device_id: str) -> dict[str, Any] | None:
+        async with self._lock:
+            value = self._heartbeats.get(device_id)
+            return dict(value) if value else None
+
+
+runtime = GatewayRuntime()
+
+
+async def _send_json(websocket: WebSocket, connection_id: str, payload: dict[str, Any]) -> None:
+    if websocket.client_state != WebSocketState.CONNECTED:
+        return
+    session_id = await runtime.get_session_id(connection_id)
+    body = dict(payload)
+    if session_id and "session_id" not in body:
+        body["session_id"] = session_id
+    await websocket.send_json(body)
+
+
+async def _call_json(method: str, url: str, *, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+    timeout = httpx.Timeout(settings.device_http_timeout_sec, connect=8)
+    async with httpx.AsyncClient(timeout=timeout, trust_env=False) as client:
+        response = await client.request(method, url, json=payload)
+    if response.status_code >= 400:
+        message = response.text or f"upstream error {response.status_code}"
+        raise HTTPException(status_code=502, detail=message)
+    if not response.text:
+        return {}
+    try:
+        parsed = response.json()
+        if isinstance(parsed, dict):
+            return parsed
+        return {"raw": parsed}
+    except Exception:
+        return {"raw": response.text}
+
+
+async def _call_upload_voice(audio_bytes: bytes) -> str:
+    if not audio_bytes:
+        return ""
+    timeout = httpx.Timeout(settings.device_http_timeout_sec, connect=8)
+    files = {"file": ("device_audio.opus", audio_bytes, "application/octet-stream")}
+    async with httpx.AsyncClient(timeout=timeout, trust_env=False) as client:
+        response = await client.post(f"{settings.asr_service_url}/voice/upload", files=files)
+    if response.status_code >= 400:
+        return ""
+    try:
+        body = response.json()
+    except Exception:
+        return ""
+    return str(body.get("chunk_id") or "").strip()
+
+
+async def _run_pipeline(
+    *,
+    session_id: str,
+    device_id: str,
+    department_id: str,
+    requested_by: str,
+    mode: str,
+    source: str,
+    input_text: str,
+    audio_bytes: bytes,
+    audio_packets: list[bytes] | None = None,
+) -> dict[str, Any]:
+    await runtime.upsert_turn(
+        session_id,
+        {
+            "session_id": session_id,
+            "device_id": device_id or settings.device_id_default,
+            "department_id": (department_id or "").strip() or settings.device_department_id_default,
+            "requested_by": (requested_by or "").strip() or settings.device_owner_user_id,
+            "owner_username": settings.device_owner_username,
+            "mode": mode or "patient_query",
+            "source": source,
+            "status": "processing",
+            "input_text": (input_text or "").strip(),
+            "input_audio_bytes": len(audio_bytes or b""),
+            "error": "",
+        },
+    )
+
+    try:
+        text_hint = (input_text or "").strip()
+        asr_audio_bytes = bytes(audio_bytes or b"")
+        if audio_packets:
+            decoded_wav = _opus_packets_to_wav_bytes(audio_packets, target_sample_rate=16000)
+            if decoded_wav:
+                asr_audio_bytes = decoded_wav
+
+        chunk_id = await _call_upload_voice(asr_audio_bytes)
+        transcribe_payload: dict[str, Any] = {
+            "request_id": str(uuid.uuid4()),
+        }
+        if text_hint:
+            transcribe_payload["text_hint"] = text_hint
+        if chunk_id:
+            transcribe_payload["chunk_id"] = chunk_id
+        elif asr_audio_bytes:
+            transcribe_payload["audio_base64"] = base64.b64encode(asr_audio_bytes).decode("utf-8")
+
+        stt_resp = await _call_json("POST", f"{settings.asr_service_url}/asr/transcribe", payload=transcribe_payload)
+        stt_text = str(stt_resp.get("text") or text_hint or settings.device_default_stt_text).strip()
+        if not stt_text:
+            stt_text = settings.device_default_stt_text
+
+        bed_no = _extract_bed_no(stt_text)
+        if mode in {"handover", "document", "escalation"}:
+            workflow_map = {
+                "handover": "handover_generate",
+                "document": "document_generation",
+                "escalation": "recommendation_request",
+            }
+            wf_payload: dict[str, Any] = {
+                "workflow_type": workflow_map.get(mode, "voice_inquiry"),
+                "conversation_id": session_id,
+                "user_input": stt_text,
+                "requested_by": (requested_by or "").strip() or settings.device_owner_user_id,
+            }
+            target_department = (department_id or "").strip() or settings.device_department_id_default
+            if target_department:
+                wf_payload["department_id"] = target_department
+            if bed_no:
+                wf_payload["bed_no"] = bed_no
+            ai_resp = await _call_json("POST", f"{settings.agent_orchestrator_service_url}/workflow/run", payload=wf_payload)
+        else:
+            chat_payload: dict[str, Any] = {
+                "mode": "agent_cluster",
+                "cluster_profile": "nursing_default_cluster",
+                "conversation_id": session_id,
+                "user_input": stt_text,
+                "requested_by": (requested_by or "").strip() or settings.device_owner_user_id,
+                "attachments": [],
+            }
+            target_department = (department_id or "").strip() or settings.device_department_id_default
+            if target_department:
+                chat_payload["department_id"] = target_department
+            if bed_no:
+                chat_payload["bed_no"] = bed_no
+            ai_resp = await _call_json("POST", f"{settings.agent_orchestrator_service_url}/ai/chat", payload=chat_payload)
+
+        summary = str(ai_resp.get("summary") or settings.device_default_tts_text).strip()
+        findings = ai_resp.get("findings") if isinstance(ai_resp.get("findings"), list) else []
+        recommendations = ai_resp.get("recommendations") if isinstance(ai_resp.get("recommendations"), list) else []
+        confidence = float(ai_resp.get("confidence", 0.72) or 0.72)
+        review_required = bool(ai_resp.get("review_required", True))
+
+        tts_input = summary
+        max_chars = max(settings.device_tts_max_chars, 0)
+        if max_chars and len(tts_input) > max_chars:
+            tts_input = f"{tts_input[:max_chars].rstrip('，,。.!?！？') }。"
+
+        tts_resp = await _call_json(
+            "POST",
+            f"{settings.tts_service_url}/tts/speak",
+            payload={"text": tts_input, "voice": "default"},
+        )
+        audio_base64 = str(tts_resp.get("audio_base64") or "").strip()
+
+        turn = await runtime.upsert_turn(
+            session_id,
+            {
+                "status": "completed",
+                "stt_text": stt_text,
+                "summary": summary,
+                "findings": findings,
+                "recommendations": recommendations,
+                "confidence": confidence,
+                "review_required": review_required,
+                "audio_base64": audio_base64,
+                "audio_ready": bool(audio_base64),
+                "audio_mime": "audio/wav",
+                "error": "",
+            },
+        )
+        return turn
+    except asyncio.CancelledError:
+        raise
+    except HTTPException as exc:
+        turn = await runtime.upsert_turn(
+            session_id,
+            {
+                "status": "failed",
+                "error": str(exc.detail or "pipeline_failed"),
+            },
+        )
+        return turn
+    except Exception as exc:
+        turn = await runtime.upsert_turn(
+            session_id,
+            {
+                "status": "failed",
+                "error": f"pipeline_failed:{exc}",
+            },
+        )
+        return turn
+
+
+async def _run_ws_turn(websocket: WebSocket, connection_id: str, mode: str) -> None:
+    wait_sec = max(settings.device_capture_wait_ms, 0) / 1000.0
+    if wait_sec:
+        await asyncio.sleep(wait_sec)
+
+    session_id = await runtime.get_session_id(connection_id)
+    if not session_id:
+        session_id = _new_session_id()
+        await runtime.set_session_id(connection_id, session_id)
+
+    detect_text = await runtime.consume_detect_text(connection_id)
+    audio_packets = await runtime.consume_audio_packets(connection_id)
+    audio_bytes = await runtime.consume_audio_buffer(connection_id)
+    if len(audio_bytes) < settings.device_min_audio_bytes and not detect_text:
+        logger.info("skip_turn_empty_audio connection_id=%s bytes=%s", connection_id, len(audio_bytes))
+        return
+
+    delay_sec = max(settings.device_response_delay_ms, 0) / 1000.0
+    if delay_sec:
+        await asyncio.sleep(delay_sec)
+
+    owner = await runtime.get_device_owner()
+    turn = await _run_pipeline(
+        session_id=session_id,
+        device_id=settings.device_id_default,
+        department_id=settings.device_department_id_default,
+        requested_by=(owner.get("user_id") or settings.device_owner_user_id),
+        mode=mode or "patient_query",
+        source="websocket",
+        input_text=detect_text,
+        audio_bytes=audio_bytes,
+        audio_packets=audio_packets,
+    )
+
+    if turn.get("status") != "completed":
+        error_text = str(turn.get("error") or "local processing failed")
+        await runtime.set_last_error(connection_id, error_text)
+        await _send_json(websocket, connection_id, {"type": "stt", "text": error_text})
+        await _send_json(websocket, connection_id, {"type": "tts", "state": "start"})
+        await _send_json(websocket, connection_id, {"type": "tts", "state": "sentence_start", "text": error_text})
+        await _send_json(websocket, connection_id, {"type": "tts", "state": "stop"})
+        return
+
+    stt_text = str(turn.get("stt_text") or settings.device_default_stt_text)
+    tts_text = str(turn.get("summary") or settings.device_default_tts_text)
+    await runtime.set_turn_text(connection_id, stt_text=stt_text, tts_text=tts_text)
+
+    await _send_json(websocket, connection_id, {"type": "stt", "text": stt_text})
+    await _send_json(websocket, connection_id, {"type": "llm", "emotion": "neutral"})
+    await _send_json(websocket, connection_id, {"type": "tts", "state": "start"})
+    sentence_gap = max(settings.device_tts_sentence_gap_ms, 0) / 1000.0
+    for sentence in _split_tts_sentences(tts_text):
+        await _send_json(websocket, connection_id, {"type": "tts", "state": "sentence_start", "text": sentence})
+        if sentence_gap:
+            await asyncio.sleep(sentence_gap)
+
+    # Stream encoded Opus packets to the firmware speaker path.
+    audio_base64 = str(turn.get("audio_base64") or "").strip()
+    tts_packets: list[bytes] = []
+    if audio_base64:
+        try:
+            wav_bytes = base64.b64decode(audio_base64)
+        except Exception:
+            wav_bytes = b""
+        if wav_bytes:
+            tts_packets = _wav_bytes_to_opus_packets(
+                wav_bytes,
+                target_sample_rate=16000,
+                frame_duration_ms=max(10, min(settings.device_tts_frame_duration_ms, 120)),
+            )
+    if tts_packets:
+        await _send_ws_audio_packets(websocket, tts_packets, pace_ms=max(0, settings.device_tts_packet_pace_ms))
+    else:
+        logger.warning("ws_tts_no_audio_packets connection_id=%s session_id=%s", connection_id, session_id)
+
+    await _send_json(websocket, connection_id, {"type": "tts", "state": "stop"})
+
+
+async def _run_mock_turn(websocket: WebSocket, connection_id: str) -> None:
+    reply = await runtime.consume_reply()
+    stt_text = (reply.stt_text or settings.device_default_stt_text).strip()
+    tts_text = (reply.tts_text or settings.device_default_tts_text).strip()
+    delay = max(settings.device_response_delay_ms, 0) / 1000.0
+    try:
+        if delay:
+            await asyncio.sleep(delay)
+        await _send_json(websocket, connection_id, {"type": "stt", "text": stt_text})
+        await runtime.set_turn_text(connection_id, stt_text=stt_text)
+        await asyncio.sleep(0.1)
+        await _send_json(websocket, connection_id, {"type": "llm", "emotion": "neutral"})
+        await asyncio.sleep(0.08)
+        await _send_json(websocket, connection_id, {"type": "tts", "state": "start"})
+        for sentence in _split_tts_sentences(tts_text):
+            await _send_json(websocket, connection_id, {"type": "tts", "state": "sentence_start", "text": sentence})
+            await asyncio.sleep(0.16)
+        await _send_json(websocket, connection_id, {"type": "tts", "state": "stop"})
+        await runtime.set_turn_text(connection_id, tts_text=tts_text)
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        logger.warning("mock_turn_failed connection_id=%s err=%s", connection_id, exc)
+
+
+async def _handle_text_message(websocket: WebSocket, connection_id: str, message: str) -> None:
+    try:
+        payload = json.loads(message)
+    except json.JSONDecodeError:
+        logger.info("ignore_non_json connection_id=%s", connection_id)
+        return
+
+    msg_type = str(payload.get("type") or "").strip().lower()
+    await runtime.mark_text_frame(connection_id, msg_type or "unknown")
+
+    if msg_type == "hello":
+        session_id = str(payload.get("session_id") or "").strip() or _new_session_id()
+        await runtime.set_session_id(connection_id, session_id)
+        await _send_json(
+            websocket,
+            connection_id,
+            {
+                "type": "hello",
+                "transport": "websocket",
+                "session_id": session_id,
+                "audio_params": {
+                    "format": "opus",
+                    "sample_rate": 16000,
+                    "channels": 1,
+                    "frame_duration": max(10, min(settings.device_tts_frame_duration_ms, 120)),
+                },
+                "features": {"mcp": True},
+            },
+        )
+        logger.info("ws_hello connection_id=%s session_id=%s", connection_id, session_id)
+        return
+
+    if msg_type == "listen":
+        state = str(payload.get("state") or "").strip().lower()
+        mode = str(payload.get("mode") or "").strip().lower() or "patient_query"
+        if mode == "auto":
+            mode = "patient_query"
+        if state == "start":
+            await runtime.set_listening(connection_id, True, mode)
+            await runtime.clear_audio_buffer(connection_id)
+            logger.info("listen_start connection_id=%s mode=%s", connection_id, mode)
+            return
+        if state == "stop":
+            await runtime.set_listening(connection_id, False, mode)
+            if settings.mock_mode:
+                task = asyncio.create_task(_run_mock_turn(websocket, connection_id))
+            else:
+                task = asyncio.create_task(_run_ws_turn(websocket, connection_id, mode))
+            await runtime.attach_session_task(connection_id, task)
+            logger.info("listen_stop connection_id=%s mode=%s", connection_id, mode)
+            return
+        if state == "detect":
+            detect_text = str(payload.get("text") or "").strip()
+            if detect_text:
+                await runtime.set_detect_text(connection_id, detect_text)
+            logger.info("listen_detect connection_id=%s text=%s", connection_id, detect_text)
+            # Some firmware variants never emit listen:stop in websocket mode.
+            # Trigger one turn proactively when detect arrives to avoid stuck waiting.
+            if settings.mock_mode:
+                task = asyncio.create_task(_run_mock_turn(websocket, connection_id))
+            else:
+                task = asyncio.create_task(_run_ws_turn(websocket, connection_id, mode))
+            await runtime.attach_session_task(connection_id, task)
+            logger.info("listen_detect_trigger_turn connection_id=%s mode=%s", connection_id, mode)
+            return
+
+    if msg_type == "abort":
+        await runtime.cancel_session_task(connection_id)
+        await _send_json(websocket, connection_id, {"type": "tts", "state": "stop"})
+        logger.info("abort connection_id=%s", connection_id)
+        return
+
+    if msg_type == "goodbye":
+        await runtime.cancel_session_task(connection_id)
+        await _send_json(websocket, connection_id, {"type": "goodbye"})
+        await websocket.close()
+        logger.info("goodbye connection_id=%s", connection_id)
+        return
+
+    if msg_type == "mcp":
+        await _send_json(
+            websocket,
+            connection_id,
+            {"type": "mcp", "payload": {"status": "ok", "echo": payload.get("payload", {})}},
+        )
+        logger.info("mcp_echo connection_id=%s", connection_id)
+        return
+
+    logger.info("ignore_type connection_id=%s type=%s", connection_id, msg_type or "<empty>")
+
+
+@router.get("/health")
+def health() -> dict[str, Any]:
+    return {"status": "ok", "service": settings.service_name}
+
+
+@router.get("/ready")
+def ready() -> dict[str, Any]:
+    return {"status": "ready", "service": settings.service_name}
+
+
+@router.get("/version")
+def version() -> dict[str, Any]:
+    return {
+        "service": settings.service_name,
+        "version": settings.app_version,
+        "env": settings.app_env,
+        "mock_mode": settings.mock_mode,
+        "pipeline_mode": settings.device_pipeline_mode,
+        "owner_user_id": settings.device_owner_user_id,
+        "owner_username": settings.device_owner_username,
+        "ws_audio_stream": True,
+        "decode_client_binary_v3": True,
+    }
+
+
+@router.api_route("/xiaozhi/ota/", methods=["GET", "POST"])
+@router.api_route("/xiaozhi/ota", methods=["GET", "POST"])
+@router.api_route("/xiaozhi/", methods=["GET", "POST"])
+@router.api_route("/xiaozhi", methods=["GET", "POST"])
+async def xiaozhi_ota(request: Request) -> dict[str, Any]:
+    now = _utc_now()
+    return {
+        "server_time": {
+            "timestamp": int(now.timestamp() * 1000),
+            "timezone_offset": _timezone_offset_minutes(),
+        },
+        "firmware": {
+            "version": settings.firmware_version_floor,
+            "url": settings.firmware_url,
+            "force": 0,
+        },
+        "websocket": {
+            "url": _request_ws_url(request),
+            "token": settings.device_ws_token,
+            "version": settings.device_ws_version,
+        },
+    }
+
+
+@router.post("/xiaozhi/ota/activate")
+async def xiaozhi_activate(payload: dict[str, Any] | None = None) -> dict[str, Any]:
+    return {
+        "status": "ok",
+        "activated": True,
+        "received": bool(payload),
+        "at": _iso_now(),
+    }
+
+
+@router.get("/api/device/sessions")
+async def device_sessions() -> dict[str, Any]:
+    sessions = await runtime.list_sessions()
+    return {"count": len(sessions), "sessions": sessions}
+
+
+@router.get("/api/device/binding")
+async def device_binding() -> dict[str, Any]:
+    owner = await runtime.get_device_owner()
+    return {
+        "status": "ok",
+        "device_id": settings.device_id_default,
+        "owner_user_id": owner.get("user_id") or settings.device_owner_user_id,
+        "owner_username": owner.get("username") or settings.device_owner_username,
+    }
+
+
+@router.post("/api/device/bind")
+async def device_bind(payload: DeviceBindPayload) -> dict[str, Any]:
+    user_id = (payload.user_id or "").strip()
+    username = (payload.username or "").strip()
+    if not user_id and not username:
+        raise HTTPException(status_code=400, detail="user_id_or_username_required")
+
+    if not user_id and username:
+        user_id = f"u_{username}"
+    if user_id and not username:
+        if user_id.startswith("u_"):
+            username = user_id[2:]
+        else:
+            username = user_id
+
+    owner = await runtime.set_device_owner(user_id=user_id, username=username)
+    return {
+        "status": "ok",
+        "device_id": settings.device_id_default,
+        "owner_user_id": owner.get("user_id") or settings.device_owner_user_id,
+        "owner_username": owner.get("username") or settings.device_owner_username,
+    }
+
+
+@router.post("/api/device/mock/reply")
+async def set_mock_reply(payload: MockReplyPayload) -> dict[str, Any]:
+    await runtime.set_mock_reply(payload)
+    return {
+        "status": "ok",
+        "mode": "once" if payload.once else "sticky",
+        "stt_text": payload.stt_text,
+        "tts_text": payload.tts_text,
+    }
+
+
+@router.delete("/api/device/mock/reply")
+async def clear_mock_reply() -> dict[str, Any]:
+    await runtime.clear_mock_reply()
+    return {"status": "ok", "cleared": True}
+
+
+@router.post("/api/device/audio/upload")
+async def device_audio_upload(
+    request: Request,
+    file: UploadFile | None = File(default=None),
+    device_id: str = Form(default=""),
+    session_id: str = Form(default=""),
+) -> dict[str, Any]:
+    sid = (session_id or "").strip() or _new_session_id()
+    raw = b""
+    if file is not None:
+        raw = await file.read()
+    if not raw:
+        raw = await request.body()
+    await runtime.save_uploaded_audio(sid, raw)
+    await runtime.upsert_turn(
+        sid,
+        {
+            "session_id": sid,
+            "device_id": (device_id or settings.device_id_default).strip() or settings.device_id_default,
+            "status": "accepted",
+            "source": "http_upload",
+            "input_audio_bytes": len(raw),
+        },
+    )
+    return {"session_id": sid, "status": "accepted"}
+
+
+@router.post("/api/device/query")
+async def device_query(payload: DeviceQueryPayload) -> dict[str, Any]:
+    sid = (payload.session_id or "").strip() or _new_session_id()
+    mode = (payload.mode or "patient_query").strip() or "patient_query"
+    device_id = (payload.device_id or settings.device_id_default).strip() or settings.device_id_default
+    department_id = (payload.department_id or settings.device_department_id_default).strip() or settings.device_department_id_default
+    owner = await runtime.get_device_owner()
+    requested_by = (payload.requested_by or owner.get("user_id") or settings.device_owner_user_id).strip() or settings.device_owner_user_id
+    text = (payload.text or "").strip()
+    audio = await runtime.get_uploaded_audio(sid)
+
+    await runtime.upsert_turn(
+        sid,
+        {
+            "session_id": sid,
+            "device_id": device_id,
+            "department_id": department_id,
+            "requested_by": requested_by,
+            "owner_username": owner.get("username") or settings.device_owner_username,
+            "mode": mode,
+            "status": "processing",
+            "source": "http_query",
+            "input_text": text,
+            "input_audio_bytes": len(audio),
+            "error": "",
+        },
+    )
+
+    async def _job() -> None:
+        await _run_pipeline(
+            session_id=sid,
+            device_id=device_id,
+            department_id=department_id,
+            requested_by=requested_by,
+            mode=mode,
+            source="http_query",
+            input_text=text,
+            audio_bytes=audio,
+        )
+
+    task = asyncio.create_task(_job())
+    await runtime.attach_turn_task(sid, task)
+    return {"status": "processing", "session_id": sid}
+
+
+@router.get("/api/device/result/{session_id}")
+async def device_result(session_id: str) -> dict[str, Any]:
+    sid = (session_id or "").strip()
+    turn = await runtime.get_turn(sid)
+    if not turn:
+        return {
+            "status": "waiting",
+            "summary": "",
+            "audio_ready": False,
+            "audio_url": "",
+            "review_required": True,
+            "session_id": sid,
+        }
+    return {
+        "status": turn.get("status", "waiting"),
+        "summary": turn.get("summary", ""),
+        "audio_ready": bool(turn.get("audio_ready")),
+        "audio_url": f"/api/device/audio/{sid}" if turn.get("audio_base64") else "",
+        "review_required": bool(turn.get("review_required", True)),
+        "session_id": sid,
+        "requested_by": turn.get("requested_by", ""),
+        "owner_username": turn.get("owner_username", ""),
+        "stt_text": turn.get("stt_text", ""),
+        "findings": turn.get("findings", []),
+        "recommendations": turn.get("recommendations", []),
+        "confidence": turn.get("confidence", 0.0),
+        "error": turn.get("error", ""),
+    }
+
+
+@router.get("/api/device/audio/{session_id}")
+async def device_audio(session_id: str) -> Response:
+    sid = (session_id or "").strip()
+    turn = await runtime.get_turn(sid)
+    if not turn:
+        raise HTTPException(status_code=404, detail="session_not_found")
+    audio_base64 = str(turn.get("audio_base64") or "").strip()
+    if not audio_base64:
+        raise HTTPException(status_code=404, detail="audio_not_ready")
+    try:
+        binary = base64.b64decode(audio_base64)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"audio_decode_failed:{exc}") from exc
+    media_type = str(turn.get("audio_mime") or "audio/wav")
+    return Response(content=binary, media_type=media_type)
+
+
+@router.post("/api/device/heartbeat")
+async def device_heartbeat(payload: DeviceHeartbeatPayload) -> dict[str, Any]:
+    await runtime.set_heartbeat(
+        payload.device_id,
+        {
+            "battery": payload.battery,
+            "wifi_rssi": payload.wifi_rssi,
+            "status": payload.status,
+        },
+    )
+    return {"status": "ok", "device_id": payload.device_id, "at": _iso_now()}
+
+
+@router.websocket("/xiaozhi/v1/")
+@router.websocket("/xiaozhi/v1")
+@router.websocket("/xia")
+@router.websocket("/xia/")
+async def xiaozhi_v1(websocket: WebSocket) -> None:
+    await websocket.accept()
+    connection_id = str(uuid.uuid4())
+    await runtime.add_session(connection_id, _client_peer(websocket))
+    logger.info("ws_connected connection_id=%s client=%s", connection_id, _client_peer(websocket))
+
+    try:
+        while True:
+            frame = await websocket.receive()
+            if frame.get("type") == "websocket.disconnect":
+                break
+            if frame.get("text") is not None:
+                await _handle_text_message(websocket, connection_id, str(frame["text"]))
+                continue
+            if frame.get("bytes") is not None:
+                payload = _decode_ws_audio_payload(bytes(frame["bytes"]))
+                await runtime.append_audio_frame(connection_id, payload)
+                continue
+    except WebSocketDisconnect:
+        logger.info("ws_disconnected connection_id=%s", connection_id)
+    except Exception as exc:
+        logger.warning("ws_error connection_id=%s err=%s", connection_id, exc)
+        try:
+            await websocket.close()
+        except Exception:
+            pass
+    finally:
+        await runtime.remove_session(connection_id)
