@@ -135,13 +135,36 @@ for entry in "${SERVICES[@]}"; do
   systemctl restart "ai-nursing-${name}.service"
 done
 
-sleep 8
+wait_for_http() {
+  local url="$1"
+  local label="$2"
+  local max_attempts="${3:-30}"
+  local delay_sec="${4:-2}"
+
+  local attempt=1
+  while (( attempt <= max_attempts )); do
+    if curl -fsS "${url}" >/tmp/ai_nursing_health_check.json 2>/tmp/ai_nursing_health_check.err; then
+      cat /tmp/ai_nursing_health_check.json
+      rm -f /tmp/ai_nursing_health_check.json /tmp/ai_nursing_health_check.err
+      return 0
+    fi
+    sleep "${delay_sec}"
+    attempt=$((attempt + 1))
+  done
+
+  echo "${label} failed after ${max_attempts} attempts." >&2
+  if [[ -f /tmp/ai_nursing_health_check.err ]]; then
+    cat /tmp/ai_nursing_health_check.err >&2
+  fi
+  rm -f /tmp/ai_nursing_health_check.json /tmp/ai_nursing_health_check.err
+  return 1
+}
 
 echo
 echo "API gateway health:"
-curl -fsS "http://127.0.0.1:${API_GATEWAY_PORT:-8000}/health"
+wait_for_http "http://127.0.0.1:${API_GATEWAY_PORT:-8000}/health" "API gateway health"
 echo
 echo
 echo "Runtime health:"
-curl -fsS "http://127.0.0.1:${API_GATEWAY_PORT:-8000}/api/ai/runtime"
+wait_for_http "http://127.0.0.1:${API_GATEWAY_PORT:-8000}/api/ai/runtime" "Runtime health"
 echo
