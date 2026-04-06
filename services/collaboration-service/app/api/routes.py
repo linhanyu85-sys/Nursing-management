@@ -141,6 +141,15 @@ def list_direct_sessions(user_id: str, limit: int = Query(default=100, ge=1, le=
     return collaboration_store.list_direct_sessions(user_id=user_id, limit=limit)
 
 
+@router.get("/collab/admin/direct-sessions", response_model=list[DirectSessionOut])
+def admin_list_direct_sessions(
+    query: str = Query(default=""),
+    status_filter: str | None = Query(default=None),
+    limit: int = Query(default=200, ge=1, le=500),
+) -> list[DirectSessionOut]:
+    return collaboration_store.list_direct_sessions_admin(query=query, status_filter=status_filter, limit=limit)
+
+
 @router.post("/collab/direct/open", response_model=DirectSessionOut)
 def open_direct_session(payload: DirectSessionOpenRequest) -> DirectSessionOut:
     try:
@@ -172,6 +181,14 @@ def send_direct_message(payload: DirectMessageCreateRequest) -> MessageOut:
 @router.get("/collab/direct/session/{session_id}", response_model=DirectSessionDetailOut)
 def get_direct_session_detail(session_id: str, user_id: str = Query(...)) -> DirectSessionDetailOut:
     detail = collaboration_store.get_direct_session_detail(session_id=session_id, owner_user_id=user_id)
+    if detail is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="direct_session_not_found")
+    return detail
+
+
+@router.get("/collab/admin/direct-sessions/{session_id}", response_model=DirectSessionDetailOut)
+def admin_get_direct_session_detail(session_id: str) -> DirectSessionDetailOut:
+    detail = collaboration_store.get_direct_session_detail_admin(session_id=session_id)
     if detail is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="direct_session_not_found")
     return detail

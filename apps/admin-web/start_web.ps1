@@ -44,7 +44,8 @@ if (Test-Path $python) {
 }
 
 if ($started) {
-  Start-Process "http://127.0.0.1:$Port/index.html"
+  $gatewayBase = [uri]::EscapeDataString("http://127.0.0.1:8000")
+  Start-Process "http://127.0.0.1:$Port/index.html?apiBase=$gatewayBase"
   exit 0
 }
 

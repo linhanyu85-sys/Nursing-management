@@ -3,65 +3,67 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>护理后台管理系统</title>
-  <link rel="stylesheet" href="./assets/styles.css?v=20260330b" />
+  <title>护理精细化后台管理</title>
+  <link rel="stylesheet" href="./assets/admin-sync.css?v=20260405a" />
 </head>
 <body>
-  <div class="app-shell">
-    <aside class="side-nav">
-      <div class="brand-block">
+  <div class="shell">
+    <aside class="sidebar">
+      <div class="brand">
         <div class="brand-mark">护</div>
-        <div class="brand-copy">
-          <h1>护理后台管理</h1>
-          <p>病例、账号、病区运行和后台联通状态统一维护</p>
+        <div>
+          <h1>护理精细化后台</h1>
+          <p>和手机端共用同一套患者、文书、模板、消息与账号数据</p>
         </div>
       </div>
 
-      <nav class="nav-list" id="nav-list">
-        <button class="nav-link active" data-view="overview">病区总览</button>
-        <button class="nav-link" data-view="cases">病例工作台</button>
-        <button class="nav-link" data-view="accounts">账号中心</button>
-        <button class="nav-link" data-view="monitor">联通监控</button>
+      <nav id="nav-list" class="nav-list">
+        <button class="nav-button active" data-view="overview">总览</button>
+        <button class="nav-button" data-view="cases">病例</button>
+        <button class="nav-button" data-view="accounts">账号</button>
+        <button class="nav-button" data-view="documents">文书</button>
+        <button class="nav-button" data-view="messages">消息</button>
+        <button class="nav-button" data-view="monitor">监控</button>
       </nav>
 
-      <section class="nav-card">
-        <div class="nav-card-label">当前病区</div>
-        <div class="nav-card-title" id="current-department-name">加载中</div>
-        <div class="nav-card-meta" id="current-department-meta">等待同步病区数据</div>
+      <section class="side-card">
+        <div class="side-label">当前病区</div>
+        <div id="current-department-name" class="side-title">未加载</div>
+        <div id="current-department-meta" class="side-meta">等待同步当前病区</div>
       </section>
 
-      <section class="nav-card">
-        <div class="nav-card-label">当前操作账号</div>
-        <div class="nav-card-title" id="operator-name">未选择</div>
-        <div class="nav-card-meta" id="operator-role">请在顶部切换当前操作账号</div>
+      <section class="side-card">
+        <div class="side-label">当前操作账号</div>
+        <div id="operator-name" class="side-title">未选择</div>
+        <div id="operator-role" class="side-meta">请先选择要代入的后台账号</div>
       </section>
     </aside>
 
-    <main class="main-shell">
+    <main class="main">
       <header class="topbar">
-        <div class="topbar-copy">
-          <div class="topbar-label">护理系统后台</div>
-          <h2 id="view-title">病区总览</h2>
+        <div>
+          <div class="topbar-kicker">护理精细化管理台</div>
+          <h2 id="view-title">总览</h2>
         </div>
         <div class="topbar-actions">
-          <button id="gateway-status" class="status-chip is-neutral">网关待检测</button>
-          <button id="refresh-btn" class="action-btn-secondary">刷新</button>
-          <button id="open-config-btn" class="action-btn-secondary">连接配置</button>
+          <button id="gateway-status" class="status-chip neutral" type="button">网关待检查</button>
+          <button id="refresh-btn" class="ghost-btn" type="button">刷新</button>
+          <button id="open-config-btn" class="ghost-btn" type="button">接口配置</button>
         </div>
       </header>
 
-      <section class="filterbar">
-        <label class="field-group field-group-wide">
+      <section class="filters">
+        <label class="field">
           <span>病区</span>
           <select id="department-select"></select>
         </label>
 
-        <label class="field-group field-group-wide">
-          <span>检索</span>
-          <input id="global-search" type="text" placeholder="搜索床位、姓名、病历号、账号或任务" />
+        <label class="field grow">
+          <span>搜索</span>
+          <input id="global-search" type="text" placeholder="搜索床位、患者、账号、文书、模板或消息" />
         </label>
 
-        <label class="field-group">
+        <label class="field">
           <span>病例状态</span>
           <select id="case-status-filter">
             <option value="">全部</option>
@@ -71,7 +73,7 @@
           </select>
         </label>
 
-        <label class="field-group">
+        <label class="field">
           <span>账号状态</span>
           <select id="account-status-filter">
             <option value="">全部</option>
@@ -81,48 +83,48 @@
           </select>
         </label>
 
-        <label class="field-group field-group-wide">
-          <span>当前操作账号</span>
+        <label class="field">
+          <span>操作账号</span>
           <select id="operator-select"></select>
         </label>
       </section>
 
-      <section class="system-strip" id="system-strip"></section>
+      <section id="system-strip" class="system-strip"></section>
 
       <section id="view-root" class="view-root">
         <div class="loading-state">
           <div class="spinner"></div>
-          <p>正在加载后台管理数据...</p>
+          <p>正在加载后台数据...</p>
         </div>
       </section>
     </main>
   </div>
 
-  <div class="drawer hidden" id="config-drawer">
+  <div id="config-drawer" class="drawer hidden">
     <div class="drawer-panel">
       <div class="drawer-head">
         <div>
-          <div class="drawer-label">连接配置</div>
-          <h3>API 网关地址</h3>
+          <div class="topbar-kicker">接口配置</div>
+          <h3>统一 API 网关</h3>
         </div>
-        <button id="close-config-btn" class="icon-btn" type="button">关闭</button>
+        <button id="close-config-btn" class="ghost-btn" type="button">关闭</button>
       </div>
 
-      <div class="drawer-body">
-        <label class="field-group">
-          <span>API 地址</span>
-          <input id="cfg-api-base" type="text" placeholder="http://127.0.0.1:18000" />
-        </label>
-        <p class="drawer-tip">如果管理台已经挂在同一个网关下，通常保持默认即可。</p>
-      </div>
+      <label class="field">
+        <span>API Base</span>
+        <input id="cfg-api-base" type="text" placeholder="http://127.0.0.1:8000" />
+      </label>
+
+      <p class="drawer-tip">默认指向当前手机端使用的统一网关，Web 与手机端会直接读写同一份数据。</p>
 
       <div class="drawer-actions">
-        <button id="save-config-btn" class="action-btn">保存并重载</button>
+        <button id="save-config-btn" class="primary-btn" type="button">保存并重载</button>
       </div>
     </div>
   </div>
 
   <div id="toast-stack" class="toast-stack"></div>
-  <script src="./assets/app.js?v=20260330b"></script>
+
+  <script src="./assets/admin-sync.js?v=20260405a"></script>
 </body>
 </html>

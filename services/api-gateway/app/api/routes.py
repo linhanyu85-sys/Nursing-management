@@ -67,7 +67,7 @@ async def patient_case(patient_id: str) -> Any:
 
 @router.post("/api/admin/patient-cases")
 async def admin_patient_case_upsert(payload: dict[str, Any]) -> Any:
-    return await forward_json("POST", f"{settings.patient_context_service_url}/cases/upsert", payload=payload)
+    return await forward_json("POST", f"{settings.patient_context_service_url}/admin/patient-cases", payload=payload)
 
 
 @router.get("/api/admin/departments")
@@ -507,6 +507,18 @@ async def collab_direct_sessions(user_id: str, limit: int = Query(default=100, g
     )
 
 
+@router.get("/api/admin/direct-sessions")
+async def admin_direct_sessions(
+    query: str = Query(default=""),
+    status_filter: str | None = Query(default=None),
+    limit: int = Query(default=200, ge=1, le=500),
+) -> Any:
+    return await forward_get(
+        f"{settings.collaboration_service_url}/collab/admin/direct-sessions",
+        params={"query": query, "status_filter": status_filter or "", "limit": limit},
+    )
+
+
 @router.post("/api/collab/direct/open")
 async def collab_direct_open(payload: dict[str, Any]) -> Any:
     return await forward_json("POST", f"{settings.collaboration_service_url}/collab/direct/open", payload=payload)
@@ -523,6 +535,11 @@ async def collab_direct_session(session_id: str, user_id: str = Query(...)) -> A
         f"{settings.collaboration_service_url}/collab/direct/session/{session_id}",
         params={"user_id": user_id},
     )
+
+
+@router.get("/api/admin/direct-sessions/{session_id}")
+async def admin_direct_session_detail(session_id: str) -> Any:
+    return await forward_get(f"{settings.collaboration_service_url}/collab/admin/direct-sessions/{session_id}")
 
 
 @router.post("/api/collab/assistant/digest")

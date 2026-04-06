@@ -333,12 +333,62 @@ class CollaborationStore:
         selected.sort(key=lambda x: x.updated_at, reverse=True)
         return selected[:limit]
 
+    def list_direct_sessions_admin(
+        self,
+        *,
+        query: str = "",
+        status_filter: str | None = None,
+        limit: int = 200,
+    ) -> list[DirectSessionOut]:
+        q = (query or "").strip().lower()
+        status_value = (status_filter or "").strip().lower()
+        selected: list[DirectSessionOut] = []
+        for session in self._direct_sessions:
+            raw_status = str(session.get("status") or "open")
+            if status_value and raw_status.lower() != status_value:
+                continue
+            owner_user_id = str(session.get("user_id") or "")
+            detail = self._build_direct_session_out(session, owner_user_id=owner_user_id)
+            if q:
+                latest_text = str(detail.latest_message.content if detail.latest_message else "")
+                owner = self._accounts.get(owner_user_id)
+                contact = detail.contact
+                joined = " ".join(
+                    [
+                        detail.id,
+                        detail.patient_id or "",
+                        owner_user_id,
+                        detail.contact_user_id,
+                        owner.account if owner else "",
+                        owner.full_name if owner else "",
+                        contact.account if contact else "",
+                        contact.full_name if contact else "",
+                        latest_text,
+                    ]
+                ).lower()
+                if q not in joined:
+                    continue
+            selected.append(detail)
+        selected.sort(key=lambda item: item.updated_at, reverse=True)
+        return selected[:limit]
+
     def get_direct_session_detail(self, session_id: str, owner_user_id: str) -> DirectSessionDetailOut | None:
         raw = self._find_direct_session(session_id)
         if not raw:
             return None
         if owner_user_id not in {raw.get("user_id"), raw.get("contact_user_id")}:
             return None
+        messages = [item for item in self._direct_messages if item.thread_id == session_id]
+        return DirectSessionDetailOut(
+            session=self._build_direct_session_out(raw, owner_user_id=owner_user_id),
+            messages=messages,
+        )
+
+    def get_direct_session_detail_admin(self, session_id: str) -> DirectSessionDetailOut | None:
+        raw = self._find_direct_session(session_id)
+        if not raw:
+            return None
+        owner_user_id = str(raw.get("user_id") or "")
         messages = [item for item in self._direct_messages if item.thread_id == session_id]
         return DirectSessionDetailOut(
             session=self._build_direct_session_out(raw, owner_user_id=owner_user_id),
