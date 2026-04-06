@@ -66,6 +66,7 @@ function detectDefaultApiBase() {
 const DEFAULT_CFG = {
   apiBase: detectDefaultApiBase(),
   departmentId: "",
+  departmentPinned: false,
   caseStatus: "",
   accountStatus: "",
   operatorUsername: "",
@@ -181,6 +182,7 @@ function bindEvents() {
 
   els["department-select"].addEventListener("change", async (event) => {
     state.cfg.departmentId = String(event.target.value || "");
+    state.cfg.departmentPinned = true;
     saveConfig(state.cfg);
     await Promise.all([refreshOverview(), refreshCases({ keepSelection: true }), refreshMonitor()]);
     render();
@@ -314,10 +316,13 @@ async function refreshAll(options = {}) {
   try {
     await refreshGateway();
     await refreshDepartments();
+    await refreshAccounts({ keepSelection: !options.init });
+    await reconcileDepartmentSelection({
+      preferPopulated: Boolean(options.init) || !state.cfg.departmentPinned,
+    });
     await Promise.all([
       refreshOverview(),
       refreshCases({ keepSelection: !options.init }),
-      refreshAccounts({ keepSelection: !options.init }),
       refreshDocuments({ keepSelection: !options.init }),
       refreshMessages({ keepSelection: !options.init }),
       refreshMonitor(),
@@ -343,9 +348,128 @@ async function refreshDepartments() {
   state.departments = rows;
   const validIds = new Set(rows.map((item) => String(item.id || "")));
   if (!validIds.has(state.cfg.departmentId)) {
-    state.cfg.departmentId = rows[0]?.id || "";
+    state.cfg.departmentId = "";
+    state.cfg.departmentPinned = false;
     saveConfig(state.cfg);
   }
+}
+
+async function reconcileDepartmentSelection(options = {}) {
+  const rows = normalizeArray(state.departments);
+  if (!rows.length) {
+    if (state.cfg.departmentId) {
+      state.cfg.departmentId = "";
+      state.cfg.departmentPinned = false;
+      saveConfig(state.cfg);
+    }
+    return;
+  }
+
+  const validIds = new Set(rows.map((item) => String(item.id || "")));
+  const currentId = String(state.cfg.departmentId || "");
+  if (validIds.has(currentId) && (!options.preferPopulated || state.cfg.departmentPinned)) {
+    return;
+  }
+
+  const nextId = String((await pickPreferredDepartmentId(rows, { currentId })) || "");
+  const fallbackId = nextId || (validIds.has(currentId) ? currentId : String(rows[0]?.id || ""));
+  if (!fallbackId || fallbackId === currentId) {
+    return;
+  }
+
+  state.cfg.departmentId = fallbackId;
+  state.cfg.departmentPinned = false;
+  saveConfig(state.cfg);
+}
+
+async function pickPreferredDepartmentId(rows, options = {}) {
+  const departments = normalizeArray(rows);
+  if (!departments.length) {
+    return "";
+  }
+
+  const currentId = String(options.currentId || "");
+  const counts = await fetchDepartmentCaseCounts();
+  if (currentId && ((counts.get(currentId) || 0) > 0 || counts.size === 0)) {
+    return currentId;
+  }
+
+  const operatorMatchedId = findPreferredDepartmentForOperator(departments, counts);
+  if (operatorMatchedId) {
+    return operatorMatchedId;
+  }
+
+  let best = null;
+  departments.forEach((item, index) => {
+    const id = String(item.id || "");
+    const count = counts.get(id) || 0;
+    if (!best || count > best.count || (count === best.count && count > 0 && index < best.index)) {
+      best = { id, count, index };
+    }
+  });
+
+  if (best?.count > 0) {
+    return best.id;
+  }
+
+  return currentId && departments.some((item) => String(item.id || "") === currentId) ? currentId : String(departments[0]?.id || "");
+}
+
+async function fetchDepartmentCaseCounts() {
+  const counts = new Map();
+  try {
+    const rows = normalizeArray(
+      await api("/api/admin/patient-cases", {
+        params: { limit: 500 },
+      }),
+    );
+    rows.forEach((item) => {
+      const departmentId = String(item.department_id || "");
+      if (!departmentId) {
+        return;
+      }
+      counts.set(departmentId, (counts.get(departmentId) || 0) + 1);
+    });
+  } catch (error) {
+    console.warn("Failed to infer populated departments.", error);
+  }
+  return counts;
+}
+
+function findPreferredDepartmentForOperator(rows, counts = new Map()) {
+  const operator = getCurrentOperator();
+  const operatorKey = normalizeDepartmentKey(operator?.department);
+  if (!operatorKey) {
+    return "";
+  }
+
+  const ranked = normalizeArray(rows)
+    .map((item, index) => ({
+      id: String(item.id || ""),
+      key: normalizeDepartmentKey(item.name || item.code || item.id),
+      count: counts.get(String(item.id || "")) || 0,
+      index,
+    }))
+    .sort((a, b) => b.count - a.count || a.index - b.index);
+
+  const direct = ranked.find(
+    (item) => item.count > 0 && item.key && (item.key === operatorKey || item.key.startsWith(operatorKey) || operatorKey.startsWith(item.key)),
+  );
+  if (direct?.id) {
+    return direct.id;
+  }
+
+  const prefix = operatorKey.slice(0, Math.min(2, operatorKey.length));
+  const fuzzy = prefix.length >= 2 ? ranked.find((item) => item.count > 0 && item.key.startsWith(prefix)) : null;
+  return fuzzy?.id || "";
+}
+
+function normalizeDepartmentKey(value) {
+  return String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, "")
+    .replace(/护理单元|病区|病房|科室|住院楼|楼层|住院|单元|科/g, "");
 }
 
 async function refreshOverview() {
@@ -1893,7 +2017,7 @@ function renderInlineSelect(label, field, value, options = []) {
 function renderEmpty(copy) {
   return `
     <div class="empty-state">
-      <div class="spinner"></div>
+      <div class="empty-glyph">暂无</div>
       <p>${escapeHtml(copy)}</p>
     </div>
   `;
