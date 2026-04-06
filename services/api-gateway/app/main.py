@@ -23,6 +23,19 @@ app.add_middleware(
 
 app.include_router(router)
 
-admin_web_dir = Path(__file__).resolve().parents[3] / "apps" / "admin-web"
-if admin_web_dir.exists():
-    app.mount("/admin", StaticFiles(directory=admin_web_dir, html=True), name="admin-web")
+project_apps_dir = Path(__file__).resolve().parents[3] / "apps"
+
+static_mounts = [
+    ("admin-web", "/admin", True),
+    ("mobile-web", "/mobile", True),
+    ("downloads", "/downloads", False),
+]
+
+for folder_name, mount_path, html_mode in static_mounts:
+    static_dir = project_apps_dir / folder_name
+    if static_dir.exists():
+        app.mount(
+            mount_path,
+            StaticFiles(directory=static_dir, html=html_mode),
+            name=folder_name,
+        )
